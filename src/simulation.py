@@ -11,12 +11,39 @@ from stonesoup.types.array import StateVector
 from stonesoup.types.detection import Detection
 
 
-def simulate_target(Pd=0.85, num_steps=50, dt=1.0, plot=False):
+def simulate_target(target_type="aircraft",
+                    num_steps=50,
+                    dt=1.0,
+                    plot=False):
+
+    # ---------------- Target Class Configuration ----------------
+
+    if target_type == "bird":
+        speed = 20.0
+        process_noise = 2.0        # higher maneuver variability
+        Pd = 0.80
+
+    elif target_type == "aircraft":
+        speed = 250.0
+        process_noise = 0.1       # very smooth motion
+        Pd = 0.95
+
+    elif target_type == "stealth":
+        speed = 250.0
+        process_noise = 0.1       # identical motion to aircraft
+        Pd = 0.70                  # lower detection reliability
+
+    else:
+        raise ValueError("Invalid target_type")
+
+    # ---------------- Motion Model ----------------
 
     transition_model = CombinedLinearGaussianTransitionModel([
-        ConstantVelocity(0.1),
-        ConstantVelocity(0.1)
+        ConstantVelocity(process_noise),
+        ConstantVelocity(process_noise)
     ])
+
+    # ---------------- Radar Model ----------------
 
     measurement_model = CartesianToBearingRange(
         ndim_state=4,
@@ -24,8 +51,14 @@ def simulate_target(Pd=0.85, num_steps=50, dt=1.0, plot=False):
         noise_covar=np.diag([np.radians(1.0), 10.0])
     )
 
+    # Slight random heading variation for realism
+    heading_angle = np.random.uniform(-np.pi/6, np.pi/6)
+
+    vx = speed * np.cos(heading_angle)
+    vy = speed * np.sin(heading_angle)
+
     truth = GaussianState(
-        StateVector([0, 20, 0, 10]),
+        StateVector([0, vx, 0, vy]),
         np.diag([1, 1, 1, 1]),
         timestamp=datetime.now()
     )
@@ -35,6 +68,8 @@ def simulate_target(Pd=0.85, num_steps=50, dt=1.0, plot=False):
 
     truth_x, truth_y = [], []
     meas_x, meas_y = [], []
+
+    # ---------------- Simulation Loop ----------------
 
     for _ in range(num_steps):
 
@@ -82,11 +117,11 @@ def simulate_target(Pd=0.85, num_steps=50, dt=1.0, plot=False):
 
     if plot:
         plt.figure()
-        plt.plot(truth_x, truth_y, label="True Trajectory")
-        plt.scatter(meas_x, meas_y, marker='x', label="Radar Measurements")
+        plt.plot(truth_x, truth_y, label="Truth")
+        plt.scatter(meas_x, meas_y, marker='x', label="Measurements")
         plt.xlabel("X Position")
         plt.ylabel("Y Position")
-        plt.title(f"Simulation Debug (Pd = {Pd})")
+        plt.title(f"Simulation Debug ({target_type})")
         plt.legend()
         plt.grid(True)
         plt.show()
@@ -94,6 +129,5 @@ def simulate_target(Pd=0.85, num_steps=50, dt=1.0, plot=False):
     return truth_states, detections, transition_model, measurement_model
 
 
-# --- Allow standalone debugging ---
 if __name__ == "__main__":
-    simulate_target(Pd=0.85, plot=True)
+    simulate_target(target_type="bird", plot=True)
