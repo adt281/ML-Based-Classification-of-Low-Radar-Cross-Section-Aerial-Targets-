@@ -84,7 +84,7 @@ This module represents the behavioral classification layer.
 It learns decision boundaries in feature space derived from radar tracking behavior.
 """
 
-import pandas as pd
+import joblib
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.preprocessing import LabelEncoder
@@ -101,7 +101,6 @@ def train_model(samples_per_class=300):
     X = df.drop(columns=["label"])
     y = df["label"]
 
-    # Encode labels to integers
     encoder = LabelEncoder()
     y_encoded = encoder.fit_transform(y)
 
@@ -128,10 +127,13 @@ def train_model(samples_per_class=300):
     print("\nClassification Report:")
     print(classification_report(y_test, y_pred, target_names=encoder.classes_))
 
-    print("\nFeature Importance:")
-    for feature, importance in zip(X.columns, model.feature_importances_):
-        print(f"{feature}: {importance:.4f}")
+    # Save model and encoder
+    joblib.dump(model, "trained_model.pkl")
+    joblib.dump(encoder, "label_encoder.pkl")
+
+    print("\nModel saved as trained_model.pkl")
+    print("Encoder saved as label_encoder.pkl")
 
 
 if __name__ == "__main__":
-    train_model(samples_per_class=200)
+    train_model(samples_per_class=300)
