@@ -45,11 +45,18 @@ def simulate_target(target_type="aircraft",
 
     # ---------------- Radar Model ----------------
 
+    bearing_std_deg = 1   # realistic surveillance radar
+    range_std_m = 10.0
+
     measurement_model = CartesianToBearingRange(
         ndim_state=4,
         mapping=(0, 2),
-        noise_covar=np.diag([np.radians(1.0), 10.0])
+        noise_covar=np.diag([
+            np.radians(bearing_std_deg)**2,
+            range_std_m**2
+        ])
     )
+
 
     # Slight random heading variation for realism
     heading_angle = np.random.uniform(-np.pi/6, np.pi/6)
