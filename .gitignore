@@ -27,3 +27,7 @@ dist/
 
 # Dataset (optional if large)
 *.csv
+
+# Trained models
+*.pkl
+*.joblib
