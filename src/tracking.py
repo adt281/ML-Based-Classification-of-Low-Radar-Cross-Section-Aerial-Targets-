@@ -1,3 +1,73 @@
+"""
+Extended Kalman Filter (EKF) Tracking Layer
+
+Purpose:
+    Estimate the target state X = [x, vx, y, vy]^T
+    using noisy radar measurements z = [θ, r].
+
+Why EKF?
+    The radar measurement model is nonlinear:
+
+        r = sqrt(x^2 + y^2)
+        θ = arctan2(y, x)
+
+    Therefore a linear Kalman Filter cannot be used.
+    EKF linearizes the nonlinear measurement function locally.
+
+System Models:
+
+1) Motion Model (State Transition)
+    X_{k+1} = F X_k + w_k
+
+    F = Constant Velocity transition matrix
+    w_k ~ N(0, Q)  (process noise)
+
+    This model:
+        - Propagates state forward (prediction step)
+        - Handles motion continuity
+        - Enables tracking during missed detections
+
+2) Measurement Model
+    z_k = h(X_k) + v_k
+
+    h(X) = nonlinear Cartesian → Polar conversion
+    v_k ~ N(0, R)  (measurement noise)
+
+    This model:
+        - Maps predicted state to expected radar measurement
+        - Enables correction step using actual detection
+
+EKF Algorithm Per Time Step:
+
+Prediction:
+    X̂_{k|k-1} = F X̂_{k-1}
+    P_{k|k-1} = F P_{k-1} F^T + Q
+
+Linearization:
+    H_k = ∂h/∂X evaluated at predicted state
+
+Kalman Gain:
+    K_k = P H^T (H P H^T + R)^{-1}
+
+Update (if detection exists):
+    X̂_k = X̂_{k|k-1} + K (z - h(X̂_{k|k-1}))
+    P_k = (I - K H) P_{k|k-1}
+
+If detection is missing:
+    X̂_k = X̂_{k|k-1}
+    P_k = P_{k|k-1}
+
+Key Insight:
+    - Motion model predicts where target should be.
+    - Measurement model corrects prediction using radar data.
+    - Missed detections cause covariance growth.
+    - Stealth targets exhibit higher uncertainty due to fewer updates.
+
+This module represents the radar tracking estimator.
+It reconstructs target motion from noisy range–bearing measurements.
+"""
+
+
 import numpy as np
 import matplotlib.pyplot as plt
 

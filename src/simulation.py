@@ -1,3 +1,82 @@
+"""
+High-Level Radar Tracking Simulation
+
+State Vector:
+    X = [x, vx, y, vy]^T
+
+This module simulates a moving aerial target observed by a 2D radar.
+
+System Components:
+1. Motion Model (Constant Velocity):
+    - Propagates the true state over time.
+    - Adds Gaussian process noise to simulate maneuver uncertainty.
+    - Generates evolving Cartesian state [x, vx, y, vy].
+
+
+It generates these values using: 
+    Xk+1 = FXk + wk
+
+    F = constant velocity transition matrix
+    F= 1 0 0 0 
+       dt 1 0 0
+       0 0 1 0 
+       0 0 dt 1
+
+    wk= Gaussian process noise
+
+2. Radar Measurement Model:
+    - Converts Cartesian position (x, y) to polar coordinates:
+          r = sqrt(x^2 + y^2)
+          θ = arctan(y / x)
+    - Adds Gaussian measurement noise.
+    
+    - Produces radar detections (range, bearing).
+
+3. Detection Probability (Pd):
+    - Models missed detections.
+    - Lower Pd simulates stealth behavior.
+
+Target Classes:
+    - Bird: low speed, higher maneuver noise.
+    - Aircraft: high speed, smooth motion.
+    - Stealth: same motion as aircraft, lower Pd.
+
+Output:
+    - Ground truth states over time
+    - Radar detections (with missed detections)
+    - Motion and measurement models for tracking stage
+
+This module simulates the physical and sensor layer only.
+Tracking and classification are handled separately.
+"""
+
+"""
+High-Level Radar Tracking Simulation (Realistic Fighter-Class Radar)
+
+State Vector:
+    X = [x, vx, y, vy]^T
+
+This module simulates aerial targets observed by a modern 2D tracking radar.
+
+Motion Model:
+    X_{k+1} = F X_k + w_k
+    F = Constant velocity transition
+    w_k = Gaussian process noise
+
+Radar Measurement Model:
+    z = h(X) + v
+    h(X) = nonlinear Cartesian → Polar conversion
+           r = sqrt(x^2 + y^2)
+           θ = arctan2(y, x)
+    v = Gaussian measurement noise
+
+This module simulates:
+    - Target kinematics
+    - Radar detection behavior
+    - Missed detections
+Tracking and classification are handled separately.
+"""
+
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
