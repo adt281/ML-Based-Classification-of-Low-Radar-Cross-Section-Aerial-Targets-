@@ -67,7 +67,6 @@ This module represents the radar tracking estimator.
 It reconstructs target motion from noisy range–bearing measurements.
 """
 
-
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -89,10 +88,18 @@ def run_tracker(truth_states,
     predictor = ExtendedKalmanPredictor(transition_model)
     updater = ExtendedKalmanUpdater(measurement_model)
 
+    # 🔷 Proper Prior Initialization from First Truth
+    first_truth = truth_states[0]
+
     prior = GaussianState(
-        StateVector([0, 18, 0, 12]),
-        np.diag([100, 10, 100, 10]),
-        timestamp=truth_states[0].timestamp
+        StateVector([
+            first_truth.state_vector[0, 0],  # x
+            first_truth.state_vector[1, 0],  # vx
+            first_truth.state_vector[2, 0],  # y
+            first_truth.state_vector[3, 0],  # vy
+        ]),
+        np.diag([100, 50, 100, 50]),  # position & velocity uncertainty
+        timestamp=first_truth.timestamp
     )
 
     track = Track([prior])
@@ -150,7 +157,9 @@ if __name__ == "__main__":
 
     from src.simulation import simulate_target
 
-    truth_states, detections, transition_model, measurement_model = simulate_target(Pd=0.85)
+    truth_states, detections, transition_model, measurement_model = simulate_target(
+        target_type="aircraft"
+    )
 
     run_tracker(truth_states,
                 detections,

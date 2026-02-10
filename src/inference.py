@@ -37,4 +37,4 @@ def classify_target(simulated_type=None):
 
 
 if __name__ == "__main__":
-    classify_target("bird")
+    classify_target("stealth")
