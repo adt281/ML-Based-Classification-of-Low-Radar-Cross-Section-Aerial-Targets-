@@ -90,76 +90,46 @@ from stonesoup.types.detection import Detection
 
 
 # ============================================================
-# TARGET MODEL
+# Target Configuration Layer
 # ============================================================
 
-class Target:
+TARGET_CONFIG = {
 
-    def __init__(self, target_type="aircraft"):
+    "bird": {
+        "speed": 20.0,
+        "process_noise": 2.0,
+        "Pd": 0.80,
+        "rcs": 0.01        # m^2 (very small)
+    },
 
-        if target_type == "bird":
-            self.speed = 20.0
-            self.process_noise = 2.0
-            self.Pd = 0.80
+    "aircraft": {
+        "speed": 250.0,
+        "process_noise": 0.1,
+        "Pd": 0.95,
+        "rcs": 5.0         # m^2 (large conventional aircraft)
+    },
 
-        elif target_type == "aircraft":
-            self.speed = 250.0
-            self.process_noise = 0.1
-            self.Pd = 0.95
-
-        elif target_type == "stealth":
-            self.speed = 250.0
-            self.process_noise = 0.1
-            self.Pd = 0.70
-
-        else:
-            raise ValueError("Invalid target_type")
-
-        self.target_type = target_type
-
-
-# ============================================================
-# RADAR MODEL (No physics yet)
-# ============================================================
-
-class Radar:
-
-    def __init__(self):
-
-        self.bearing_std_deg = 1.0
-        self.range_std_m = 10.0
-
-        self.measurement_model = CartesianToBearingRange(
-            ndim_state=4,
-            mapping=(0, 2),
-            noise_covar=np.diag([
-                np.radians(self.bearing_std_deg) ** 2,
-                self.range_std_m ** 2
-            ])
-        )
-
-    def detect(self, truth_state, Pd):
-
-        if np.random.rand() <= Pd:
-
-            measurement_vector = self.measurement_model.function(
-                truth_state,
-                noise=True
-            )
-
-            detection = Detection(
-                measurement_vector,
-                timestamp=truth_state.timestamp,
-                measurement_model=self.measurement_model
-            )
-
-            return detection
-
-        return None
+    "stealth": {
+        "speed": 250.0,
+        "process_noise": 0.1,
+        "Pd": 0.70,
+        "rcs": 0.1         # m^2 (reduced RCS)
+    }
+}
 
 
 # ============================================================
-# SIMULATION FUNCTION
+# Radar Configuration Layer
+# ============================================================
+
+RADAR_CONFIG = {
+    "bearing_std_deg": 1.0,
+    "range_std_m": 10.0
+}
+
+
+# ============================================================
+# Main Simulation Function
 # ============================================================
 
 def simulate_target(target_type="aircraft",
@@ -167,27 +137,42 @@ def simulate_target(target_type="aircraft",
                     dt=1.0,
                     plot=False):
 
-    # ---------------- Initialize Target ----------------
+    if target_type not in TARGET_CONFIG:
+        raise ValueError("Invalid target_type")
 
-    target = Target(target_type)
+    config = TARGET_CONFIG[target_type]
+
+    speed = config["speed"]
+    process_noise = config["process_noise"]
+    Pd = config["Pd"]
+    rcs = config["rcs"]          # <-- New physical parameter
 
     # ---------------- Motion Model ----------------
 
     transition_model = CombinedLinearGaussianTransitionModel([
-        ConstantVelocity(target.process_noise),
-        ConstantVelocity(target.process_noise)
+        ConstantVelocity(process_noise),
+        ConstantVelocity(process_noise)
     ])
 
-    # ---------------- Radar ----------------
+    # ---------------- Radar Model ----------------
 
-    radar = Radar()
+    bearing_std_deg = RADAR_CONFIG["bearing_std_deg"]
+    range_std_m = RADAR_CONFIG["range_std_m"]
 
-    # ---------------- Initial State ----------------
+    measurement_model = CartesianToBearingRange(
+        ndim_state=4,
+        mapping=(0, 2),
+        noise_covar=np.diag([
+            np.radians(bearing_std_deg) ** 2,
+            range_std_m ** 2
+        ])
+    )
 
-    heading_angle = np.random.uniform(-np.pi/12, np.pi/12)
+    # Random initial heading
+    heading_angle = np.random.uniform(-np.pi/6, np.pi/6)
 
-    vx = target.speed * np.cos(heading_angle)
-    vy = target.speed * np.sin(heading_angle)
+    vx = speed * np.cos(heading_angle)
+    vy = speed * np.sin(heading_angle)
 
     truth = GaussianState(
         StateVector([0, vx, 0, vy]),
@@ -199,7 +184,7 @@ def simulate_target(target_type="aircraft",
     detections = []
 
     truth_x, truth_y = [], []
-    meas_x, meas_y = [], []
+    meas_x, meas_y = [], [] 
 
     # ---------------- Simulation Loop ----------------
 
@@ -210,19 +195,52 @@ def simulate_target(target_type="aircraft",
         truth_x.append(truth.state_vector[0, 0])
         truth_y.append(truth.state_vector[2, 0])
 
-        detection = radar.detect(truth, target.Pd)
+        # ---------------- Range & SNR Computation ----------------
 
-        if detection is not None:
+        x = truth.state_vector[0, 0]
+        y = truth.state_vector[2, 0]
 
-            bearing = detection.state_vector[0, 0]
-            range_ = detection.state_vector[1, 0]
+        R = np.sqrt(x**2 + y**2)
+
+        Pt = 1e6                  # Transmit power (abstract units)
+        noise_floor = 1e-12      # Small baseline noise
+
+        SNR = (Pt * rcs) / (R**4 + 1e-6)
+
+        # Logistic detection mapping
+        k = 5.0                  # Steepness
+        threshold = 1e-8         # Detection threshold
+
+        Pd = 1.0 / (1.0 + np.exp(-k * (SNR - threshold)))
+
+        # ---------------- Detection Decision ----------------
+
+        if np.random.rand() <= Pd:
+
+
+            measurement_vector = measurement_model.function(
+                truth,
+                noise=True
+            )
+
+            bearing = measurement_vector[0, 0]
+            range_ = measurement_vector[1, 0]
 
             meas_x.append(range_ * np.cos(bearing))
             meas_y.append(range_ * np.sin(bearing))
 
-        detections.append(detection)
+            detection = Detection(
+                measurement_vector,
+                timestamp=truth.timestamp,
+                measurement_model=measurement_model
+            )
 
-        # Propagate truth
+            detections.append(detection)
+
+        else:
+            detections.append(None)
+
+        # propagate truth
         new_truth_vector = transition_model.function(
             truth,
             noise=True,
@@ -239,16 +257,18 @@ def simulate_target(target_type="aircraft",
         plt.figure()
         plt.plot(truth_x, truth_y, label="Truth")
         plt.scatter(meas_x, meas_y, marker='x', label="Measurements")
-        plt.xlabel("X Position")
-        plt.ylabel("Y Position")
+        plt.xlabel("X Position (m)")
+        plt.ylabel("Y Position (m)")
         plt.title(f"Simulation Debug ({target_type})")
         plt.legend()
         plt.grid(True)
         plt.show()
 
-    return truth_states, detections, transition_model, radar.measurement_model
+    # IMPORTANT: return rcs for future radar physics
+    return truth_states, detections, transition_model, measurement_model, rcs
 
 
 # Standalone debug
 if __name__ == "__main__":
-    simulate_target(target_type="bird", plot=True)
+    simulate_target(target_type="aircraft", plot=True)
+

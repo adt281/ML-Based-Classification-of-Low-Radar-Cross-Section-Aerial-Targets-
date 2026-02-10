@@ -18,7 +18,7 @@ def generate_dataset(samples_per_class=300):
 
         for _ in tqdm(range(samples_per_class)):
 
-            truth_states, detections, transition_model, measurement_model = simulate_target(
+            truth_states, detections, transition_model, measurement_model, _ = simulate_target(
                 target_type=target_type
             )
 

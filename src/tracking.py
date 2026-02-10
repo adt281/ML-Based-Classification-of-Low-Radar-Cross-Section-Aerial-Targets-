@@ -157,9 +157,10 @@ if __name__ == "__main__":
 
     from src.simulation import simulate_target
 
-    truth_states, detections, transition_model, measurement_model = simulate_target(
-        target_type="aircraft"
+    truth_states, detections, transition_model, measurement_model, _ = simulate_target(
+    target_type="aircraft"
     )
+
 
     run_tracker(truth_states,
                 detections,
