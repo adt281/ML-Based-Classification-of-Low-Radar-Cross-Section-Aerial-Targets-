@@ -98,19 +98,28 @@ TARGET_CONFIG = {
     "bird": {
         "speed": 20.0,
         "process_noise": 2.0,
-        "rcs": 0.01      # m²
+        "rcs": 0.01,
+        "stage1": "credible",
+        "stage2": "bird",
+        "stage3": None
     },
 
     "aircraft": {
         "speed": 250.0,
         "process_noise": 0.1,
-        "rcs": 5.0      # m²
+        "rcs": 5.0,
+        "stage1": "credible",
+        "stage2": "aircraft",
+        "stage3": "strong"
     },
 
     "stealth": {
         "speed": 250.0,
         "process_noise": 0.1,
-        "rcs": 0.5       # m²
+        "rcs": 0.5,
+        "stage1": "credible",
+        "stage2": "aircraft",
+        "stage3": "weak"
     }
 }
 
@@ -120,40 +129,24 @@ TARGET_CONFIG = {
 # ============================================================
 
 RADAR_CONFIG = {
-    "Pt": 1e4,
-    "noise_floor": 1e-6,
+    "Pt": 1e12,           # stronger transmitter
+    "noise_floor": 1e-12, # lower noise
     "bearing_std_deg": 0.8,
-    "range_std_m": 20.0
+    "range_std_m": 20.0,
+    "clutter_rate": 2.0
 }
 
 
 
 # ============================================================
-# Simulation
+# Main Scene Simulation
 # ============================================================
 
-def simulate_target(target_type="aircraft",
-                    num_steps=80,
-                    dt=1.0,
-                    plot=False):
-
-    if target_type not in TARGET_CONFIG:
-        raise ValueError("Invalid target_type")
-
-    config = TARGET_CONFIG[target_type]
-
-    speed = config["speed"]
-    process_noise = config["process_noise"]
-    rcs = config["rcs"]
-
-    # ---------------- Motion Model ----------------
-
-    transition_model = CombinedLinearGaussianTransitionModel([
-        ConstantVelocity(process_noise),
-        ConstantVelocity(process_noise)
-    ])
-
-    # ---------------- Radar Model ----------------
+def simulate_scene(scene_type="aircraft",
+                   num_steps=80,
+                   dt=1.0,
+                   plot=False,
+                   diagnostics=False):
 
     measurement_model = CartesianToBearingRange(
         ndim_state=4,
@@ -164,8 +157,89 @@ def simulate_target(target_type="aircraft",
         ])
     )
 
-    # Random heading
+    truth_states = []
+    detections = []
+
+    # For diagnostics
+    range_history = []
+    snr_history = []
+    pd_history = []
+
+    # --------------------------------------------------------
+    # NOISE ONLY SCENE
+    # --------------------------------------------------------
+
+    if scene_type == "noise":
+            
+        timestamp = datetime.now()
+
+        clutter_x = []
+        clutter_y = []
+
+        for _ in range(num_steps):
+
+            clutter_count = np.random.poisson(RADAR_CONFIG["clutter_rate"])
+            step_detections = []
+
+            for _ in range(clutter_count):
+
+                bearing = np.random.uniform(-np.pi, np.pi)
+                range_ = np.random.uniform(0, 10000)
+
+                measurement_vector = StateVector([bearing, range_])
+
+                detection = Detection(
+                    measurement_vector,
+                    timestamp=timestamp,
+                    measurement_model=measurement_model
+                )
+
+                step_detections.append(detection)
+
+                # Convert to Cartesian for plotting
+                clutter_x.append(range_ * np.cos(bearing))
+                clutter_y.append(range_ * np.sin(bearing))
+
+            detections.append(step_detections if step_detections else None)
+            timestamp += timedelta(seconds=dt)
+
+        if plot:
+            plt.figure()
+            plt.scatter(clutter_x, clutter_y, s=10)
+            plt.xlabel("X Position (m)")
+            plt.ylabel("Y Position (m)")
+            plt.title("Noise / Clutter Only Scene")
+            plt.grid(True)
+            plt.show()
+
+        metadata = {
+            "stage1": "non_credible",
+            "stage2": None,
+            "stage3": None
+        }
+
+        return truth_states, detections, None, measurement_model, metadata
+
+    # --------------------------------------------------------
+    # REAL TARGET SCENE
+    # --------------------------------------------------------
+
+    if scene_type not in TARGET_CONFIG:
+        raise ValueError("Invalid scene_type")
+
+    config = TARGET_CONFIG[scene_type]
+
+    speed = config["speed"]
+    process_noise = config["process_noise"]
+    rcs = config["rcs"]
+
+    transition_model = CombinedLinearGaussianTransitionModel([
+        ConstantVelocity(process_noise),
+        ConstantVelocity(process_noise)
+    ])
+
     heading_angle = np.random.uniform(-np.pi/6, np.pi/6)
+
     vx = speed * np.cos(heading_angle)
     vy = speed * np.sin(heading_angle)
 
@@ -175,13 +249,8 @@ def simulate_target(target_type="aircraft",
         timestamp=datetime.now()
     )
 
-    truth_states = []
-    detections = []
-
     truth_x, truth_y = [], []
     meas_x, meas_y = [], []
-
-    # ---------------- Simulation Loop ----------------
 
     for _ in range(num_steps):
 
@@ -193,28 +262,28 @@ def simulate_target(target_type="aircraft",
         truth_x.append(x)
         truth_y.append(y)
 
-        # ---------------- Radar Physics ----------------
-
         R = np.sqrt(x**2 + y**2) + 1e-6
 
         Pt = RADAR_CONFIG["Pt"]
         N0 = RADAR_CONFIG["noise_floor"]
 
-        # Radar equation (simplified)
         received_power = (Pt * rcs) / (R**4)
-
         SNR_linear = received_power / N0
         SNR_dB = 10 * np.log10(SNR_linear + 1e-12)
 
-        # Detection threshold around 13 dB typical
         threshold_dB = 10
         steepness = 0.6
 
-
         Pd = 1.0 / (1.0 + np.exp(-steepness * (SNR_dB - threshold_dB)))
 
-        # ---------------- Detection Decision ----------------
+        # Store diagnostics
+        range_history.append(R)
+        snr_history.append(SNR_dB)
+        pd_history.append(Pd)
 
+        step_detections = []
+
+        # True detection
         if np.random.rand() <= Pd:
 
             measurement_vector = measurement_model.function(
@@ -222,24 +291,36 @@ def simulate_target(target_type="aircraft",
                 noise=True
             )
 
-            bearing = measurement_vector[0, 0]
-            range_ = measurement_vector[1, 0]
-
-            meas_x.append(range_ * np.cos(bearing))
-            meas_y.append(range_ * np.sin(bearing))
-
             detection = Detection(
                 measurement_vector,
                 timestamp=truth.timestamp,
                 measurement_model=measurement_model
             )
 
-            detections.append(detection)
+            step_detections.append(detection)
 
-        else:
-            detections.append(None)
+            bearing = measurement_vector[0, 0]
+            range_ = measurement_vector[1, 0]
 
-        # Propagate truth
+            meas_x.append(range_ * np.cos(bearing))
+            meas_y.append(range_ * np.sin(bearing))
+
+        # Clutter
+        clutter_count = np.random.poisson(RADAR_CONFIG["clutter_rate"])
+
+        for _ in range(clutter_count):
+            bearing = np.random.uniform(-np.pi, np.pi)
+            range_ = np.random.uniform(0, 10000)
+            measurement_vector = StateVector([bearing, range_])
+            detection = Detection(
+                measurement_vector,
+                timestamp=truth.timestamp,
+                measurement_model=measurement_model
+            )
+            step_detections.append(detection)
+
+        detections.append(step_detections if step_detections else None)
+
         new_truth_vector = transition_model.function(
             truth,
             noise=True,
@@ -252,15 +333,51 @@ def simulate_target(target_type="aircraft",
             timestamp=truth.timestamp + timedelta(seconds=dt)
         )
 
+    # --------------------------------------------------------
+    # Plotting
+    # --------------------------------------------------------
+
     if plot:
         plt.figure()
         plt.plot(truth_x, truth_y, label="Truth")
-        plt.scatter(meas_x, meas_y, marker='x', label="Measurements")
+        plt.scatter(meas_x, meas_y, marker='x', label="True Detections")
         plt.xlabel("X Position (m)")
         plt.ylabel("Y Position (m)")
-        plt.title(f"Radar Simulation ({target_type})")
+        plt.title(f"Radar Scene ({scene_type})")
         plt.legend()
         plt.grid(True)
         plt.show()
 
-    return truth_states, detections, transition_model, measurement_model
+    if diagnostics:
+        plt.figure()
+        plt.plot(range_history, snr_history)
+        plt.xlabel("Range (m)")
+        plt.ylabel("SNR (dB)")
+        plt.title("SNR vs Range")
+        plt.grid(True)
+        plt.show()
+
+        plt.figure()
+        plt.plot(range_history, pd_history)
+        plt.xlabel("Range (m)")
+        plt.ylabel("Detection Probability")
+        plt.title("Pd vs Range")
+        plt.grid(True)
+        plt.show()
+
+    metadata = {
+        "stage1": config["stage1"],
+        "stage2": config["stage2"],
+        "stage3": config["stage3"]
+    }
+
+    return truth_states, detections, transition_model, measurement_model, metadata
+
+
+if __name__ == "__main__":
+
+    simulate_scene(
+        scene_type="noise",
+        plot=True,
+        diagnostics=True
+    )
