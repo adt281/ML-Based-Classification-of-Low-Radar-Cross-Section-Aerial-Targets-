@@ -129,8 +129,8 @@ TARGET_CONFIG = {
 # ============================================================
 
 RADAR_CONFIG = {
-    "Pt": 1e12,           # stronger transmitter
-    "noise_floor": 1e-12, # lower noise
+    "Pt" : 1e9,   #radar transmitter power 
+    "noise_floor" : 1e-9,    
     "bearing_std_deg": 1.6,  #decided how much spread out radar detection is as dist increases.
     "range_std_m": 20.0,
     "clutter_rate": 2.0
@@ -377,7 +377,7 @@ def simulate_scene(scene_type="aircraft",
 if __name__ == "__main__":
 
     simulate_scene(
-        scene_type="noise",
+        scene_type="stealth",
         plot=True,
         diagnostics=True
     )
