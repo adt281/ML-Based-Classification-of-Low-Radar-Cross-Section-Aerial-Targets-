@@ -6,11 +6,24 @@ from src.tracking import run_tracker
 from src.feature_extraction import extract_features
 
 
-def generate_dataset(samples_per_class=300):
+# ============================================================
+# Scene Selection Per Stage
+# ============================================================
+
+STAGE_SCENE_MAP = {
+    "stage1": ["noise", "bird", "aircraft", "stealth"],
+    "stage2": ["bird", "aircraft", "stealth"],
+    "stage3": ["aircraft", "stealth"]
+}
+
+
+def generate_dataset(stage="stage1", samples_per_class=300):
+
+    if stage not in STAGE_SCENE_MAP:
+        raise ValueError("Invalid stage. Choose: stage1, stage2, stage3")
 
     data = []
-
-    scene_types = ["noise", "bird", "aircraft", "stealth"]
+    scene_types = STAGE_SCENE_MAP[stage]
 
     for scene_type in scene_types:
 
@@ -27,7 +40,6 @@ def generate_dataset(samples_per_class=300):
             # -------------------------
             if scene_type == "noise":
 
-                # Fake empty track-like features
                 features = {
                     "mean_speed": 0.0,
                     "speed_variance": 0.0,
@@ -43,9 +55,6 @@ def generate_dataset(samples_per_class=300):
                 }
 
             else:
-                # -------------------------
-                # Real target case
-                # -------------------------
                 track = run_tracker(
                     truth_states,
                     detections,
@@ -68,5 +77,5 @@ def generate_dataset(samples_per_class=300):
 
 
 if __name__ == "__main__":
-    df = generate_dataset(samples_per_class=50)
+    df = generate_dataset(stage="stage1", samples_per_class=50)
     print(df.head())

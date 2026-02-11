@@ -11,7 +11,7 @@ from src.dataset import generate_dataset
 def train_stage2(samples_per_class=300):
 
     print("Generating dataset...")
-    df = generate_dataset(samples_per_class=samples_per_class)
+    df = generate_dataset("stage2",samples_per_class=samples_per_class)
 
     # Keep only credible tracks
     df = df[df["stage1_label"] == "credible"]

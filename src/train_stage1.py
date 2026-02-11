@@ -11,7 +11,7 @@ from src.dataset import generate_dataset
 def train_stage1(samples_per_class=300):
 
     print("Generating dataset...")
-    df = generate_dataset(samples_per_class=samples_per_class)
+    df = generate_dataset("stage1", samples_per_class=samples_per_class)
 
     # -----------------------------
     # Stage 1 Labels Only
