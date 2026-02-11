@@ -129,13 +129,12 @@ TARGET_CONFIG = {
 # ============================================================
 
 RADAR_CONFIG = {
-    "Pt" : 1e9,   #radar transmitter power 
-    "noise_floor" : 1e-9,    
-    "bearing_std_deg": 1.6,  #decided how much spread out radar detection is as dist increases.
+    "Pt": 1e9,
+    "noise_floor": 1e-9,
+    "bearing_std_deg": 1.6,
     "range_std_m": 20.0,
     "clutter_rate": 2.0
 }
-
 
 
 # ============================================================
@@ -160,19 +159,19 @@ def simulate_scene(scene_type="aircraft",
     truth_states = []
     detections = []
 
-    # For diagnostics
     range_history = []
     snr_history = []
     pd_history = []
+    rcs_history = []
+    detection_binary = []
 
     # --------------------------------------------------------
     # NOISE ONLY SCENE
     # --------------------------------------------------------
 
     if scene_type == "noise":
-            
-        timestamp = datetime.now()
 
+        timestamp = datetime.now()
         clutter_x = []
         clutter_y = []
 
@@ -196,7 +195,6 @@ def simulate_scene(scene_type="aircraft",
 
                 step_detections.append(detection)
 
-                # Convert to Cartesian for plotting
                 clutter_x.append(range_ * np.cos(bearing))
                 clutter_y.append(range_ * np.sin(bearing))
 
@@ -206,9 +204,9 @@ def simulate_scene(scene_type="aircraft",
         if plot:
             plt.figure()
             plt.scatter(clutter_x, clutter_y, s=10)
+            plt.title("Noise / Clutter Only Scene")
             plt.xlabel("X Position (m)")
             plt.ylabel("Y Position (m)")
-            plt.title("Noise / Clutter Only Scene")
             plt.grid(True)
             plt.show()
 
@@ -219,6 +217,7 @@ def simulate_scene(scene_type="aircraft",
         }
 
         return truth_states, detections, None, measurement_model, metadata
+
 
     # --------------------------------------------------------
     # REAL TARGET SCENE
@@ -231,7 +230,7 @@ def simulate_scene(scene_type="aircraft",
 
     speed = config["speed"]
     process_noise = config["process_noise"]
-    rcs = config["rcs"]
+    rcs_mean = config["rcs"]
 
     transition_model = CombinedLinearGaussianTransitionModel([
         ConstantVelocity(process_noise),
@@ -239,7 +238,6 @@ def simulate_scene(scene_type="aircraft",
     ])
 
     heading_angle = np.random.uniform(-np.pi/6, np.pi/6)
-
     vx = speed * np.cos(heading_angle)
     vy = speed * np.sin(heading_angle)
 
@@ -267,7 +265,10 @@ def simulate_scene(scene_type="aircraft",
         Pt = RADAR_CONFIG["Pt"]
         N0 = RADAR_CONFIG["noise_floor"]
 
-        received_power = (Pt * rcs) / (R**4)
+        # 🔷 Swerling I RCS fluctuation
+        rcs_fluct = np.random.exponential(scale=rcs_mean)
+
+        received_power = (Pt * rcs_fluct) / (R**4)
         SNR_linear = received_power / N0
         SNR_dB = 10 * np.log10(SNR_linear + 1e-12)
 
@@ -276,15 +277,17 @@ def simulate_scene(scene_type="aircraft",
 
         Pd = 1.0 / (1.0 + np.exp(-steepness * (SNR_dB - threshold_dB)))
 
-        # Store diagnostics
         range_history.append(R)
         snr_history.append(SNR_dB)
         pd_history.append(Pd)
+        rcs_history.append(rcs_fluct)
 
         step_detections = []
+        detected = False
 
-        # True detection
         if np.random.rand() <= Pd:
+
+            detected = True
 
             measurement_vector = measurement_model.function(
                 truth,
@@ -304,6 +307,8 @@ def simulate_scene(scene_type="aircraft",
 
             meas_x.append(range_ * np.cos(bearing))
             meas_y.append(range_ * np.sin(bearing))
+
+        detection_binary.append(1 if detected else 0)
 
         # Clutter
         clutter_count = np.random.poisson(RADAR_CONFIG["clutter_rate"])
@@ -336,34 +341,59 @@ def simulate_scene(scene_type="aircraft",
     # --------------------------------------------------------
     # Plotting
     # --------------------------------------------------------
+    if plot or diagnostics:
 
-    if plot:
-        plt.figure()
-        plt.plot(truth_x, truth_y, label="Truth")
-        plt.scatter(meas_x, meas_y, marker='x', label="True Detections")
-        plt.xlabel("X Position (m)")
-        plt.ylabel("Y Position (m)")
-        plt.title(f"Radar Scene ({scene_type})")
-        plt.legend()
-        plt.grid(True)
+        fig, axs = plt.subplots(3, 2, figsize=(14, 12))
+        fig.suptitle(f"Radar Diagnostics - {scene_type}", fontsize=14, y=1.02)
+
+        # --- Scene ---
+        axs[0, 0].plot(truth_x, truth_y, label="Truth")
+        axs[0, 0].scatter(meas_x, meas_y, marker='x', label="Detections")
+        axs[0, 0].set_title("Scene (Top View)", pad=10)
+        axs[0, 0].set_xlabel("X Position (m)")
+        axs[0, 0].set_ylabel("Y Position (m)")
+        axs[0, 0].legend()
+        axs[0, 0].grid(True)
+
+        # --- RCS ---
+        axs[0, 1].plot(rcs_history)
+        axs[0, 1].set_title("RCS Fluctuation", pad=10)
+        axs[0, 1].set_xlabel("Time Step")
+        axs[0, 1].set_ylabel("Instantaneous RCS")
+        axs[0, 1].grid(True)
+
+        # --- SNR ---
+        axs[1, 0].plot(snr_history)
+        axs[1, 0].set_title("SNR (dB)", pad=10)
+        axs[1, 0].set_xlabel("Time Step")
+        axs[1, 0].set_ylabel("SNR (dB)")
+        axs[1, 0].grid(True)
+
+        # --- Detection Probability ---
+        axs[1, 1].plot(pd_history)
+        axs[1, 1].set_title("Detection Probability", pad=10)
+        axs[1, 1].set_xlabel("Time Step")
+        axs[1, 1].set_ylabel("Pd")
+        axs[1, 1].grid(True)
+
+        # --- Detection Timeline ---
+        axs[2, 0].step(range(len(detection_binary)), detection_binary, where='mid')
+        axs[2, 0].set_title("Detection Occurrence (1=Detected)", pad=10)
+        axs[2, 0].set_xlabel("Time Step")
+        axs[2, 0].set_ylabel("Detection")
+        axs[2, 0].set_ylim(-0.1, 1.1)
+        axs[2, 0].grid(True)
+
+        # Hide unused subplot
+        axs[2, 1].axis('off')
+
+        # Leave room for suptitle
+        # Increase spacing ONLY
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+        fig.subplots_adjust(hspace=0.5, wspace=0.3)
+
         plt.show()
 
-    if diagnostics:
-        plt.figure()
-        plt.plot(range_history, snr_history)
-        plt.xlabel("Range (m)")
-        plt.ylabel("SNR (dB)")
-        plt.title("SNR vs Range")
-        plt.grid(True)
-        plt.show()
-
-        plt.figure()
-        plt.plot(range_history, pd_history)
-        plt.xlabel("Range (m)")
-        plt.ylabel("Detection Probability")
-        plt.title("Pd vs Range")
-        plt.grid(True)
-        plt.show()
 
     metadata = {
         "stage1": config["stage1"],
