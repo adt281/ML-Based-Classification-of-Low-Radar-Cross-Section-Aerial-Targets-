@@ -90,7 +90,7 @@ from stonesoup.types.detection import Detection
 
 
 # ============================================================
-# Target Configuration Layer
+# Target Configuration
 # ============================================================
 
 TARGET_CONFIG = {
@@ -98,42 +98,42 @@ TARGET_CONFIG = {
     "bird": {
         "speed": 20.0,
         "process_noise": 2.0,
-        "Pd": 0.80,
-        "rcs": 0.01        # m^2 (very small)
+        "rcs": 0.01      # m²
     },
 
     "aircraft": {
         "speed": 250.0,
         "process_noise": 0.1,
-        "Pd": 0.95,
-        "rcs": 5.0         # m^2 (large conventional aircraft)
+        "rcs": 5.0      # m²
     },
 
     "stealth": {
         "speed": 250.0,
         "process_noise": 0.1,
-        "Pd": 0.70,
-        "rcs": 0.1         # m^2 (reduced RCS)
+        "rcs": 0.5       # m²
     }
 }
 
 
 # ============================================================
-# Radar Configuration Layer
+# Radar Configuration
 # ============================================================
 
 RADAR_CONFIG = {
-    "bearing_std_deg": 1.0,
-    "range_std_m": 10.0
+    "Pt": 1e4,
+    "noise_floor": 1e-6,
+    "bearing_std_deg": 0.8,
+    "range_std_m": 20.0
 }
 
 
+
 # ============================================================
-# Main Simulation Function
+# Simulation
 # ============================================================
 
 def simulate_target(target_type="aircraft",
-                    num_steps=50,
+                    num_steps=80,
                     dt=1.0,
                     plot=False):
 
@@ -144,8 +144,7 @@ def simulate_target(target_type="aircraft",
 
     speed = config["speed"]
     process_noise = config["process_noise"]
-    Pd = config["Pd"]
-    rcs = config["rcs"]          # <-- New physical parameter
+    rcs = config["rcs"]
 
     # ---------------- Motion Model ----------------
 
@@ -156,21 +155,17 @@ def simulate_target(target_type="aircraft",
 
     # ---------------- Radar Model ----------------
 
-    bearing_std_deg = RADAR_CONFIG["bearing_std_deg"]
-    range_std_m = RADAR_CONFIG["range_std_m"]
-
     measurement_model = CartesianToBearingRange(
         ndim_state=4,
         mapping=(0, 2),
         noise_covar=np.diag([
-            np.radians(bearing_std_deg) ** 2,
-            range_std_m ** 2
+            np.radians(RADAR_CONFIG["bearing_std_deg"])**2,
+            RADAR_CONFIG["range_std_m"]**2
         ])
     )
 
-    # Random initial heading
+    # Random heading
     heading_angle = np.random.uniform(-np.pi/6, np.pi/6)
-
     vx = speed * np.cos(heading_angle)
     vy = speed * np.sin(heading_angle)
 
@@ -184,7 +179,7 @@ def simulate_target(target_type="aircraft",
     detections = []
 
     truth_x, truth_y = [], []
-    meas_x, meas_y = [], [] 
+    meas_x, meas_y = [], []
 
     # ---------------- Simulation Loop ----------------
 
@@ -192,31 +187,35 @@ def simulate_target(target_type="aircraft",
 
         truth_states.append(truth)
 
-        truth_x.append(truth.state_vector[0, 0])
-        truth_y.append(truth.state_vector[2, 0])
-
-        # ---------------- Range & SNR Computation ----------------
-
         x = truth.state_vector[0, 0]
         y = truth.state_vector[2, 0]
 
-        R = np.sqrt(x**2 + y**2)
+        truth_x.append(x)
+        truth_y.append(y)
 
-        Pt = 1e6                  # Transmit power (abstract units)
-        noise_floor = 1e-12      # Small baseline noise
+        # ---------------- Radar Physics ----------------
 
-        SNR = (Pt * rcs) / (R**4 + 1e-6)
+        R = np.sqrt(x**2 + y**2) + 1e-6
 
-        # Logistic detection mapping
-        k = 5.0                  # Steepness
-        threshold = 1e-8         # Detection threshold
+        Pt = RADAR_CONFIG["Pt"]
+        N0 = RADAR_CONFIG["noise_floor"]
 
-        Pd = 1.0 / (1.0 + np.exp(-k * (SNR - threshold)))
+        # Radar equation (simplified)
+        received_power = (Pt * rcs) / (R**4)
+
+        SNR_linear = received_power / N0
+        SNR_dB = 10 * np.log10(SNR_linear + 1e-12)
+
+        # Detection threshold around 13 dB typical
+        threshold_dB = 10
+        steepness = 0.6
+
+
+        Pd = 1.0 / (1.0 + np.exp(-steepness * (SNR_dB - threshold_dB)))
 
         # ---------------- Detection Decision ----------------
 
         if np.random.rand() <= Pd:
-
 
             measurement_vector = measurement_model.function(
                 truth,
@@ -240,7 +239,7 @@ def simulate_target(target_type="aircraft",
         else:
             detections.append(None)
 
-        # propagate truth
+        # Propagate truth
         new_truth_vector = transition_model.function(
             truth,
             noise=True,
@@ -259,16 +258,9 @@ def simulate_target(target_type="aircraft",
         plt.scatter(meas_x, meas_y, marker='x', label="Measurements")
         plt.xlabel("X Position (m)")
         plt.ylabel("Y Position (m)")
-        plt.title(f"Simulation Debug ({target_type})")
+        plt.title(f"Radar Simulation ({target_type})")
         plt.legend()
         plt.grid(True)
         plt.show()
 
-    # IMPORTANT: return rcs for future radar physics
-    return truth_states, detections, transition_model, measurement_model, rcs
-
-
-# Standalone debug
-if __name__ == "__main__":
-    simulate_target(target_type="aircraft", plot=True)
-
+    return truth_states, detections, transition_model, measurement_model
