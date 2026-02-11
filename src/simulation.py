@@ -131,7 +131,7 @@ TARGET_CONFIG = {
 RADAR_CONFIG = {
     "Pt": 1e12,           # stronger transmitter
     "noise_floor": 1e-12, # lower noise
-    "bearing_std_deg": 0.8,
+    "bearing_std_deg": 1.6,  #decided how much spread out radar detection is as dist increases.
     "range_std_m": 20.0,
     "clutter_rate": 2.0
 }

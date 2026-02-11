@@ -3,17 +3,30 @@ import numpy as np
 
 def extract_features(track, detections):
 
+    if track is None:
+        # Noise-only scene
+        return {
+            "mean_speed": 0.0,
+            "speed_variance": 0.0,
+            "acceleration_variance": 0.0,
+            "mean_cov_trace": 0.0,
+            "cov_growth_rate": 0.0,
+            "detection_ratio": 0.0,
+            "first_detection_range": 0.0,
+            "mean_detection_range": 0.0,
+            "std_detection_range": 0.0,
+            "max_detection_gap": 0,
+            "mean_detection_gap": 0
+        }
+
     vx_list = []
     vy_list = []
     cov_traces = []
 
     detection_ranges = []
-    detection_indices = []
-
     detection_count = 0
 
-    # --- Collect kinematic + covariance data ---
-    for i, (state, detection) in enumerate(zip(track[1:], detections)):
+    for i, (state, detection_list) in enumerate(zip(track[1:], detections)):
 
         vx = state.state_vector[1, 0]
         vy = state.state_vector[3, 0]
@@ -23,22 +36,20 @@ def extract_features(track, detections):
 
         cov_traces.append(np.trace(state.covar))
 
-        if detection is not None:
+        if detection_list is not None and len(detection_list) > 0:
             detection_count += 1
 
-            # Convert detection from polar → range only
-            range_ = detection.state_vector[1, 0]
+            # Use first detection (already gated by tracker)
+            det = detection_list[0]
+            range_ = det.state_vector[1, 0]
             detection_ranges.append(range_)
-            detection_indices.append(i)
 
     vx_list = np.array(vx_list)
     vy_list = np.array(vy_list)
     cov_traces = np.array(cov_traces)
 
-    # --- Speed ---
     speed = np.sqrt(vx_list**2 + vy_list**2)
 
-    # --- Acceleration (normalized by speed to avoid magnitude bias) ---
     ax = np.diff(vx_list)
     ay = np.diff(vy_list)
 
@@ -48,7 +59,6 @@ def extract_features(track, detections):
     else:
         acceleration_variance = 0.0
 
-    # --- Detection statistics ---
     detection_ratio = detection_count / len(detections)
 
     if len(detection_ranges) > 0:
@@ -60,12 +70,11 @@ def extract_features(track, detections):
         mean_detection_range = 0.0
         std_detection_range = 0.0
 
-    # --- Detection gap statistics ---
     gaps = []
     current_gap = 0
 
-    for d in detections:
-        if d is None:
+    for d_list in detections:
+        if d_list is None or len(d_list) == 0:
             current_gap += 1
         else:
             if current_gap > 0:
@@ -82,13 +91,12 @@ def extract_features(track, detections):
         max_gap = 0
         mean_gap = 0
 
-    # --- Covariance growth rate ---
     if len(cov_traces) > 1:
         cov_growth = np.polyfit(range(len(cov_traces)), cov_traces, 1)[0]
     else:
         cov_growth = 0.0
 
-    features = {
+    return {
         "mean_speed": np.mean(speed),
         "speed_variance": np.var(speed),
         "acceleration_variance": acceleration_variance,
@@ -101,5 +109,3 @@ def extract_features(track, detections):
         "max_detection_gap": max_gap,
         "mean_detection_gap": mean_gap
     }
-
-    return features

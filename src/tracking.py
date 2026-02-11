@@ -79,26 +79,58 @@ from stonesoup.predictor.kalman import ExtendedKalmanPredictor
 from stonesoup.updater.kalman import ExtendedKalmanUpdater
 
 
+def select_best_detection(prediction, detection_list):
+    """
+    Select detection closest to predicted position (simple nearest neighbor).
+    """
+    if detection_list is None or len(detection_list) == 0:
+        return None
+
+    pred_x = prediction.state_vector[0, 0]
+    pred_y = prediction.state_vector[2, 0]
+
+    min_dist = np.inf
+    best_detection = None
+
+    for det in detection_list:
+        bearing = det.state_vector[0, 0]
+        range_ = det.state_vector[1, 0]
+
+        x = range_ * np.cos(bearing)
+        y = range_ * np.sin(bearing)
+
+        dist = np.sqrt((x - pred_x)**2 + (y - pred_y)**2)
+
+        if dist < min_dist:
+            min_dist = dist
+            best_detection = det
+
+    return best_detection
+
+
 def run_tracker(truth_states,
                 detections,
                 transition_model,
                 measurement_model,
                 plot=False):
 
+    # Noise-only scene → no tracker
+    if truth_states is None or len(truth_states) == 0:
+        return None
+
     predictor = ExtendedKalmanPredictor(transition_model)
     updater = ExtendedKalmanUpdater(measurement_model)
 
-    # 🔷 Proper Prior Initialization from First Truth
     first_truth = truth_states[0]
 
     prior = GaussianState(
         StateVector([
-            first_truth.state_vector[0, 0],  # x
-            first_truth.state_vector[1, 0],  # vx
-            first_truth.state_vector[2, 0],  # y
-            first_truth.state_vector[3, 0],  # vy
+            first_truth.state_vector[0, 0],
+            first_truth.state_vector[1, 0],
+            first_truth.state_vector[2, 0],
+            first_truth.state_vector[3, 0],
         ]),
-        np.diag([100, 50, 100, 50]),  # position & velocity uncertainty
+        np.diag([100, 50, 100, 50]),
         timestamp=first_truth.timestamp
     )
 
@@ -108,7 +140,7 @@ def run_tracker(truth_states,
     meas_x, meas_y = [], []
     est_x, est_y = [], []
 
-    for truth, detection in zip(truth_states, detections):
+    for truth, detection_list in zip(truth_states, detections):
 
         truth_x.append(truth.state_vector[0, 0])
         truth_y.append(truth.state_vector[2, 0])
@@ -118,17 +150,17 @@ def run_tracker(truth_states,
             timestamp=truth.timestamp
         )
 
+        detection = select_best_detection(prediction, detection_list)
+
         if detection is not None:
             hypothesis = SingleHypothesis(prediction, detection)
             posterior = updater.update(hypothesis)
 
-            # Convert polar detection to Cartesian for plotting
             bearing = detection.state_vector[0, 0]
             range_ = detection.state_vector[1, 0]
 
             meas_x.append(range_ * np.cos(bearing))
             meas_y.append(range_ * np.sin(bearing))
-
         else:
             posterior = prediction
 
@@ -140,7 +172,7 @@ def run_tracker(truth_states,
     if plot:
         plt.figure()
         plt.plot(truth_x, truth_y, label="Truth")
-        plt.scatter(meas_x, meas_y, marker='x', label="Measurements")
+        plt.scatter(meas_x, meas_y, marker='x', label="Selected Detections")
         plt.plot(est_x, est_y, linestyle='--', label="EKF Estimate")
         plt.xlabel("X Position")
         plt.ylabel("Y Position")
@@ -152,18 +184,18 @@ def run_tracker(truth_states,
     return track
 
 
-# --- Standalone Debug Mode ---
 if __name__ == "__main__":
 
-    from src.simulation import simulate_target
+    from src.simulation import simulate_scene
 
-    truth_states, detections, transition_model, measurement_model, _ = simulate_target(
-    target_type="aircraft"
+    truth_states, detections, transition_model, measurement_model, _ = simulate_scene(
+        scene_type="stealth"
     )
 
-
-    run_tracker(truth_states,
-                detections,
-                transition_model,
-                measurement_model,
-                plot=True)
+    run_tracker(
+        truth_states,
+        detections,
+        transition_model,
+        measurement_model,
+        plot=True
+    )
