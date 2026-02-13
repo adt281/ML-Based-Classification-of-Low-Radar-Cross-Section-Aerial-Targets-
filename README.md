@@ -7,7 +7,7 @@ This project simulates a physics-based radar environment and applies machine lea
 
 The system models radar propagation physics, RCS fluctuation, SNR-driven detection probability, clutter, and missed detections. Targets are tracked using an Extended Kalman Filter (EKF), and statistical track features are used to classify credible aircraft — including low-RCS stealth targets — from background radar noise.
 
-The project is currently under active development.
+*The project is currently under active development.
 
 ---
 
