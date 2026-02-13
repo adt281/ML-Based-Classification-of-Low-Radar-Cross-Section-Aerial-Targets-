@@ -133,12 +133,80 @@ RADAR_CONFIG = {
     "noise_floor": 1e-9,
     "bearing_std_deg": 1.6,
     "range_std_m": 20.0,
-    "clutter_rate": 2.0
+
+    # Clutter realism
+    "clutter_clusters": 3,
+    "clutter_spread_m": 800,
+    "clutter_drift_std": 80,
+
+    "base_clutter_rate": 5,
+    "ground_clutter_boost_range": 2500,
+    "ground_clutter_multiplier": 2.5,
+
+    # Heavy-tailed amplitude (gamma parameters)
+    "clutter_shape_k": 0.8,
+    "clutter_scale_theta": 1.0
 }
 
 
 # ============================================================
-# Main Scene Simulation
+# Helper: Heavy-Tailed Clutter Power
+# ============================================================
+
+def sample_clutter_amplitude():
+    return np.random.gamma(
+        RADAR_CONFIG["clutter_shape_k"],
+        RADAR_CONFIG["clutter_scale_theta"]
+    )
+
+
+# ============================================================
+# Helper: Generate Clustered Clutter
+# ============================================================
+
+def generate_clustered_clutter(timestamp,
+                               measurement_model,
+                               cluster_centers,
+                               clutter_spread,
+                               num_points):
+
+    detections = []
+    clutter_x = []
+    clutter_y = []
+
+    for _ in range(num_points):
+
+        cx, cy = cluster_centers[np.random.randint(len(cluster_centers))]
+
+        x = np.random.normal(cx, clutter_spread)
+        y = np.random.normal(cy, clutter_spread)
+
+        r = np.sqrt(x**2 + y**2)
+        theta = np.arctan2(y, x)
+
+        # heavy-tailed amplitude
+        amplitude = sample_clutter_amplitude()
+
+        # only create detection if amplitude exceeds minimal threshold
+        if amplitude > 0.2:
+
+            measurement_vector = StateVector([theta, r])
+
+            detection = Detection(
+                measurement_vector,
+                timestamp=timestamp,
+                measurement_model=measurement_model
+            )
+
+            detections.append(detection)
+            clutter_x.append(x)
+            clutter_y.append(y)
+
+    return detections, clutter_x, clutter_y
+
+
+# ============================================================
+# Main Simulation
 # ============================================================
 
 def simulate_scene(scene_type="aircraft",
@@ -159,54 +227,69 @@ def simulate_scene(scene_type="aircraft",
     truth_states = []
     detections = []
 
-    range_history = []
-    snr_history = []
-    pd_history = []
-    rcs_history = []
-    detection_binary = []
-
-    # --------------------------------------------------------
-    # NOISE ONLY SCENE
-    # --------------------------------------------------------
+    # ============================================================
+    # NOISE SCENE (MULTI-LAYER CLUTTER)
+    # ============================================================
 
     if scene_type == "noise":
 
         timestamp = datetime.now()
-        clutter_x = []
-        clutter_y = []
+
+        cluster_centers = [
+            (np.random.uniform(-8000, 8000),
+             np.random.uniform(-8000, 8000))
+            for _ in range(RADAR_CONFIG["clutter_clusters"])
+        ]
+
+        clutter_x_all = []
+        clutter_y_all = []
+
+        persistent_points = []
 
         for _ in range(num_steps):
 
-            clutter_count = np.random.poisson(RADAR_CONFIG["clutter_rate"])
-            step_detections = []
+            # drift clusters (weather motion)
+            new_centers = []
+            for cx, cy in cluster_centers:
+                cx += np.random.normal(0, RADAR_CONFIG["clutter_drift_std"])
+                cy += np.random.normal(0, RADAR_CONFIG["clutter_drift_std"])
+                new_centers.append((cx, cy))
+            cluster_centers = new_centers
 
-            for _ in range(clutter_count):
+            # base clutter count
+            clutter_count = np.random.poisson(
+                RADAR_CONFIG["base_clutter_rate"]
+            )
 
-                bearing = np.random.uniform(-np.pi, np.pi)
-                range_ = np.random.uniform(0, 10000)
+            # ground clutter boost near radar
+            if np.random.rand() < 0.5:
+                clutter_count *= RADAR_CONFIG["ground_clutter_multiplier"]
 
-                measurement_vector = StateVector([bearing, range_])
+            clutter_count = int(clutter_count)
 
-                detection = Detection(
-                    measurement_vector,
-                    timestamp=timestamp,
-                    measurement_model=measurement_model
-                )
+            step_detections, cx_list, cy_list = generate_clustered_clutter(
+                timestamp,
+                measurement_model,
+                cluster_centers,
+                RADAR_CONFIG["clutter_spread_m"],
+                clutter_count
+            )
 
-                step_detections.append(detection)
-
-                clutter_x.append(range_ * np.cos(bearing))
-                clutter_y.append(range_ * np.sin(bearing))
+            # persistence (some clutter survives to next scan)
+            persistent_points = cx_list[:5]
+            clutter_x_all.extend(cx_list)
+            clutter_y_all.extend(cy_list)
 
             detections.append(step_detections if step_detections else None)
             timestamp += timedelta(seconds=dt)
 
         if plot:
-            plt.figure()
-            plt.scatter(clutter_x, clutter_y, s=10)
-            plt.title("Noise / Clutter Only Scene")
-            plt.xlabel("X Position (m)")
-            plt.ylabel("Y Position (m)")
+
+            plt.figure(figsize=(8, 6))
+            plt.scatter(clutter_x_all, clutter_y_all, s=8)
+            plt.title("Multi-Layer Realistic Clutter Scene")
+            plt.xlabel("X (m)")
+            plt.ylabel("Y (m)")
             plt.grid(True)
             plt.show()
 
@@ -219,12 +302,9 @@ def simulate_scene(scene_type="aircraft",
         return truth_states, detections, None, measurement_model, metadata
 
 
-    # --------------------------------------------------------
+    # ============================================================
     # REAL TARGET SCENE
-    # --------------------------------------------------------
-
-    if scene_type not in TARGET_CONFIG:
-        raise ValueError("Invalid scene_type")
+    # ============================================================
 
     config = TARGET_CONFIG[scene_type]
 
@@ -237,9 +317,9 @@ def simulate_scene(scene_type="aircraft",
         ConstantVelocity(process_noise)
     ])
 
-    heading_angle = np.random.uniform(-np.pi/6, np.pi/6)
-    vx = speed * np.cos(heading_angle)
-    vy = speed * np.sin(heading_angle)
+    heading = np.random.uniform(-np.pi/6, np.pi/6)
+    vx = speed * np.cos(heading)
+    vy = speed * np.sin(heading)
 
     truth = GaussianState(
         StateVector([0, vx, 0, vy]),
@@ -249,6 +329,8 @@ def simulate_scene(scene_type="aircraft",
 
     truth_x, truth_y = [], []
     meas_x, meas_y = [], []
+    detection_binary = []
+    snr_history = []
 
     for _ in range(num_steps):
 
@@ -265,22 +347,15 @@ def simulate_scene(scene_type="aircraft",
         Pt = RADAR_CONFIG["Pt"]
         N0 = RADAR_CONFIG["noise_floor"]
 
-        # 🔷 Swerling I RCS fluctuation
         rcs_fluct = np.random.exponential(scale=rcs_mean)
 
         received_power = (Pt * rcs_fluct) / (R**4)
         SNR_linear = received_power / N0
         SNR_dB = 10 * np.log10(SNR_linear + 1e-12)
 
-        threshold_dB = 10
-        steepness = 0.6
+        Pd = 1 / (1 + np.exp(-0.6 * (SNR_dB - 10)))
 
-        Pd = 1.0 / (1.0 + np.exp(-steepness * (SNR_dB - threshold_dB)))
-
-        range_history.append(R)
         snr_history.append(SNR_dB)
-        pd_history.append(Pd)
-        rcs_history.append(rcs_fluct)
 
         step_detections = []
         detected = False
@@ -303,97 +378,46 @@ def simulate_scene(scene_type="aircraft",
             step_detections.append(detection)
 
             bearing = measurement_vector[0, 0]
-            range_ = measurement_vector[1, 0]
+            r_meas = measurement_vector[1, 0]
 
-            meas_x.append(range_ * np.cos(bearing))
-            meas_y.append(range_ * np.sin(bearing))
+            meas_x.append(r_meas * np.cos(bearing))
+            meas_y.append(r_meas * np.sin(bearing))
 
         detection_binary.append(1 if detected else 0)
 
-        # Clutter
-        clutter_count = np.random.poisson(RADAR_CONFIG["clutter_rate"])
-
-        for _ in range(clutter_count):
-            bearing = np.random.uniform(-np.pi, np.pi)
-            range_ = np.random.uniform(0, 10000)
-            measurement_vector = StateVector([bearing, range_])
-            detection = Detection(
-                measurement_vector,
-                timestamp=truth.timestamp,
-                measurement_model=measurement_model
-            )
-            step_detections.append(detection)
-
         detections.append(step_detections if step_detections else None)
 
-        new_truth_vector = transition_model.function(
-            truth,
-            noise=True,
-            time_interval=timedelta(seconds=dt)
-        )
-
         truth = GaussianState(
-            new_truth_vector,
+            transition_model.function(
+                truth,
+                noise=True,
+                time_interval=timedelta(seconds=dt)
+            ),
             truth.covar,
             timestamp=truth.timestamp + timedelta(seconds=dt)
         )
 
-    # --------------------------------------------------------
-    # Plotting
-    # --------------------------------------------------------
-    if plot or diagnostics:
+    if plot:
 
-        fig, axs = plt.subplots(3, 2, figsize=(14, 12))
-        fig.suptitle(f"Radar Diagnostics - {scene_type}", fontsize=14, y=1.02)
+        fig, axs = plt.subplots(2, 2, figsize=(12, 10))
 
-        # --- Scene ---
-        axs[0, 0].plot(truth_x, truth_y, label="Truth")
-        axs[0, 0].scatter(meas_x, meas_y, marker='x', label="Detections")
-        axs[0, 0].set_title("Scene (Top View)", pad=10)
-        axs[0, 0].set_xlabel("X Position (m)")
-        axs[0, 0].set_ylabel("Y Position (m)")
-        axs[0, 0].legend()
-        axs[0, 0].grid(True)
+        axs[0, 0].plot(truth_x, truth_y)
+        axs[0, 0].scatter(meas_x, meas_y, marker='x')
+        axs[0, 0].set_title("Scene")
 
-        # --- RCS ---
-        axs[0, 1].plot(rcs_history)
-        axs[0, 1].set_title("RCS Fluctuation", pad=10)
-        axs[0, 1].set_xlabel("Time Step")
-        axs[0, 1].set_ylabel("Instantaneous RCS")
-        axs[0, 1].grid(True)
+        axs[0, 1].plot(snr_history)
+        axs[0, 1].set_title("SNR")
 
-        # --- SNR ---
-        axs[1, 0].plot(snr_history)
-        axs[1, 0].set_title("SNR (dB)", pad=10)
-        axs[1, 0].set_xlabel("Time Step")
-        axs[1, 0].set_ylabel("SNR (dB)")
-        axs[1, 0].grid(True)
+        axs[1, 0].step(range(len(detection_binary)), detection_binary)
+        axs[1, 0].set_title("Detection Timeline")
 
-        # --- Detection Probability ---
-        axs[1, 1].plot(pd_history)
-        axs[1, 1].set_title("Detection Probability", pad=10)
-        axs[1, 1].set_xlabel("Time Step")
-        axs[1, 1].set_ylabel("Pd")
-        axs[1, 1].grid(True)
+        axs[1, 1].axis('off')
 
-        # --- Detection Timeline ---
-        axs[2, 0].step(range(len(detection_binary)), detection_binary, where='mid')
-        axs[2, 0].set_title("Detection Occurrence (1=Detected)", pad=10)
-        axs[2, 0].set_xlabel("Time Step")
-        axs[2, 0].set_ylabel("Detection")
-        axs[2, 0].set_ylim(-0.1, 1.1)
-        axs[2, 0].grid(True)
+        for ax in axs.flat:
+            ax.grid(True)
 
-        # Hide unused subplot
-        axs[2, 1].axis('off')
-
-        # Leave room for suptitle
-        # Increase spacing ONLY
-        fig.tight_layout(rect=[0, 0, 1, 0.96])
-        fig.subplots_adjust(hspace=0.5, wspace=0.3)
-
+        plt.tight_layout()
         plt.show()
-
 
     metadata = {
         "stage1": config["stage1"],
@@ -407,7 +431,6 @@ def simulate_scene(scene_type="aircraft",
 if __name__ == "__main__":
 
     simulate_scene(
-        scene_type="stealth",
-        plot=True,
-        diagnostics=True
+        scene_type="noise",
+        plot=True
     )
