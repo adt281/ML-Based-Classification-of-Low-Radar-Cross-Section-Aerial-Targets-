@@ -314,6 +314,10 @@ def simulate_scene(scene_type="aircraft",
     truth_x, truth_y = [], []
     meas_x, meas_y = [], []
 
+    # NEW: measurement noise tracking
+    range_noise_std_history = []
+    bearing_noise_std_history = []
+
     for _ in range(num_steps):
 
         truth_states.append(truth)
@@ -326,6 +330,9 @@ def simulate_scene(scene_type="aircraft",
 
         R = np.sqrt(x**2 + y**2) + 1e-6
 
+        # ---------------------------
+        # Radar Equation + SNR
+        # ---------------------------
         rcs_fluct = np.random.exponential(scale=rcs_mean)
         received_power = (RADAR_CONFIG["Pt"] * rcs_fluct) / (R**4)
         SNR_linear = received_power / RADAR_CONFIG["noise_floor"]
@@ -345,10 +352,32 @@ def simulate_scene(scene_type="aircraft",
 
             detected = True
 
-            measurement_vector = measurement_model.function(
-                truth,
-                noise=True
-            )
+            # ------------------------------------------------
+            # 🔴 SNR-dependent measurement noise
+            # ------------------------------------------------
+
+            # Avoid extreme scaling
+            SNR_linear_safe = max(SNR_linear, 1e-6)
+
+            base_range_std = RADAR_CONFIG["range_std_m"]
+            base_bearing_std = np.radians(RADAR_CONFIG["bearing_std_deg"])
+
+            # Noise grows when SNR drops
+            range_std = base_range_std * np.sqrt(10 / SNR_linear_safe)
+            bearing_std = base_bearing_std * np.sqrt(10 / SNR_linear_safe)
+
+            range_noise_std_history.append(range_std)
+            bearing_noise_std_history.append(np.degrees(bearing_std))
+
+            # Ideal measurement
+            true_range = R
+            true_bearing = np.arctan2(y, x)
+
+            # Add SNR-scaled noise
+            noisy_range = true_range + np.random.normal(0, range_std)
+            noisy_bearing = true_bearing + np.random.normal(0, bearing_std)
+
+            measurement_vector = StateVector([noisy_bearing, noisy_range])
 
             step_detections.append(
                 Detection(
@@ -358,10 +387,12 @@ def simulate_scene(scene_type="aircraft",
                 )
             )
 
-            bearing = measurement_vector[0, 0]
-            r_meas = measurement_vector[1, 0]
-            meas_x.append(r_meas * np.cos(bearing))
-            meas_y.append(r_meas * np.sin(bearing))
+            meas_x.append(noisy_range * np.cos(noisy_bearing))
+            meas_y.append(noisy_range * np.sin(noisy_bearing))
+
+        else:
+            range_noise_std_history.append(0)
+            bearing_noise_std_history.append(0)
 
         detection_binary.append(1 if detected else 0)
 
@@ -402,7 +433,11 @@ def simulate_scene(scene_type="aircraft",
         axs[2, 0].set_title("Detection Timeline")
         axs[2, 0].set_ylim(-0.1, 1.1)
 
-        axs[2, 1].axis('off')
+        axs[2, 1].plot(range_noise_std_history, label="Range Noise Std")
+        axs[2, 1].plot(bearing_noise_std_history, label="Bearing Noise Std (deg)")
+        axs[2, 1].set_title("SNR-Dependent Measurement Noise")
+        axs[2, 1].legend()
+
 
         for ax in axs.flat:
             ax.grid(True)
@@ -420,4 +455,6 @@ def simulate_scene(scene_type="aircraft",
 
 
 if __name__ == "__main__":
-    simulate_scene(scene_type="noise", plot=True, diagnostics=True)
+    for target in ["aircraft", "stealth", "bird", "noise"]:
+        print(f"\nRunning simulation for: {target}")
+        simulate_scene(scene_type=target, plot=True, diagnostics=True)
