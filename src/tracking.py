@@ -1,71 +1,3 @@
-"""
-Extended Kalman Filter (EKF) Tracking Layer
-
-Purpose:
-    Estimate the target state X = [x, vx, y, vy]^T
-    using noisy radar measurements z = [θ, r].
-
-Why EKF?
-    The radar measurement model is nonlinear:
-
-        r = sqrt(x^2 + y^2)
-        θ = arctan2(y, x)
-
-    Therefore a linear Kalman Filter cannot be used.
-    EKF linearizes the nonlinear measurement function locally.
-
-System Models:
-
-1) Motion Model (State Transition)
-    X_{k+1} = F X_k + w_k
-
-    F = Constant Velocity transition matrix
-    w_k ~ N(0, Q)  (process noise)
-
-    This model:
-        - Propagates state forward (prediction step)
-        - Handles motion continuity
-        - Enables tracking during missed detections
-
-2) Measurement Model
-    z_k = h(X_k) + v_k
-
-    h(X) = nonlinear Cartesian → Polar conversion
-    v_k ~ N(0, R)  (measurement noise)
-
-    This model:
-        - Maps predicted state to expected radar measurement
-        - Enables correction step using actual detection
-
-EKF Algorithm Per Time Step:
-
-Prediction:
-    X̂_{k|k-1} = F X̂_{k-1}
-    P_{k|k-1} = F P_{k-1} F^T + Q
-
-Linearization:
-    H_k = ∂h/∂X evaluated at predicted state
-
-Kalman Gain:
-    K_k = P H^T (H P H^T + R)^{-1}
-
-Update (if detection exists):
-    X̂_k = X̂_{k|k-1} + K (z - h(X̂_{k|k-1}))
-    P_k = (I - K H) P_{k|k-1}
-
-If detection is missing:
-    X̂_k = X̂_{k|k-1}
-    P_k = P_{k|k-1}
-
-Key Insight:
-    - Motion model predicts where target should be.
-    - Measurement model corrects prediction using radar data.
-    - Missed detections cause covariance growth.
-    - Stealth targets exhibit higher uncertainty due to fewer updates.
-
-This module represents the radar tracking estimator.
-It reconstructs target motion from noisy range–bearing measurements.
-"""
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -76,6 +8,7 @@ from stonesoup.types.hypothesis import SingleHypothesis
 
 from stonesoup.predictor.kalman import ExtendedKalmanPredictor
 from stonesoup.updater.kalman import ExtendedKalmanUpdater
+from numpy.linalg import inv
 
 
 # ============================================================
@@ -91,29 +24,80 @@ def polar_to_cartesian(det):
 
 
 # ============================================================
-# Detection selection (nearest neighbor gating)
+# Phase 6: Ambiguity + SNR-based association
 # ============================================================
 
-def select_best_detection(prediction, detection_list):
+def select_best_detection(prediction,
+                          detection_list,
+                          updater,
+                          gate_threshold=9.0):
 
     if detection_list is None or len(detection_list) == 0:
         return None, None
 
-    pred_x = prediction.state_vector[0, 0]
-    pred_y = prediction.state_vector[2, 0]
-
-    min_dist = np.inf
-    best_detection = None
+    valid_detections = []
+    mahalanobis_distances = []
+    snr_values = []
 
     for det in detection_list:
-        x, y = polar_to_cartesian(det)
-        dist = np.sqrt((x - pred_x)**2 + (y - pred_y)**2)
 
-        if dist < min_dist:
-            min_dist = dist
-            best_detection = det
+        innovation = updater.measurement_model.function(
+            prediction,
+            noise=False
+        ) - det.state_vector
 
-    return best_detection, min_dist
+        H = updater.measurement_model.jacobian(prediction)
+        P = prediction.covar
+        R = updater.measurement_model.covar()
+
+        S = H @ P @ H.T + R
+
+        d2 = innovation.T @ inv(S) @ innovation
+        d2 = d2.item()
+
+        if d2 < gate_threshold:
+            valid_detections.append(det)
+            mahalanobis_distances.append(d2)
+            snr_values.append(det.metadata.get("snr_db", 30))
+
+    if len(valid_detections) == 0:
+        return None, None
+
+    # Sort detections by Mahalanobis distance
+    sorted_indices = np.argsort(mahalanobis_distances)
+    best_idx = sorted_indices[0]
+    selected_idx = best_idx
+
+    # --------------------------------------------------------
+    # Ambiguity + SNR-based wrong association probability
+    # --------------------------------------------------------
+
+    if len(sorted_indices) > 1:
+
+        second_idx = sorted_indices[1]
+
+        d1 = mahalanobis_distances[best_idx]
+        d2 = mahalanobis_distances[second_idx]
+
+        current_snr_db = snr_values[best_idx]
+
+        # Ambiguity factor (close distances = ambiguous)
+        ambiguity_threshold = 2.0
+        ambiguity_factor = max(0, 1 - abs(d2 - d1) / ambiguity_threshold)
+        ambiguity_factor = np.clip(ambiguity_factor, 0, 1)
+
+        # SNR factor (low SNR = weak discrimination)
+        snr_threshold_db = 15
+        snr_factor = max(0, 1 - (current_snr_db / snr_threshold_db))
+        snr_factor = np.clip(snr_factor, 0, 1)
+
+        # Combined probability (bounded)
+        P_wrong = 0.6 * (0.5 * ambiguity_factor + 0.5 * snr_factor)
+
+        if np.random.rand() < P_wrong:
+            selected_idx = second_idx
+
+    return valid_detections[selected_idx], mahalanobis_distances[selected_idx]
 
 
 # ============================================================
@@ -171,7 +155,11 @@ def run_tracker(truth_states,
             timestamp=truth.timestamp
         )
 
-        detection, dist = select_best_detection(prediction, detection_list)
+        detection, dist = select_best_detection(
+            prediction,
+            detection_list,
+            updater
+        )
 
         if detection is not None:
 
@@ -206,7 +194,7 @@ def run_tracker(truth_states,
         rms_error_history.append(rms_error)
 
     # ============================================================
-    # Summary Statistics
+    # Summary
     # ============================================================
 
     print("\n==== Tracking Summary ====")
@@ -217,7 +205,7 @@ def run_tracker(truth_states,
     print(f"Mean innovation distance: {np.mean(innovation_norms):.2f}")
 
     # ============================================================
-    # Unified Diagnostics Plot
+    # Diagnostics Plot
     # ============================================================
 
     if plot:
@@ -225,33 +213,27 @@ def run_tracker(truth_states,
         fig, axs = plt.subplots(3, 2, figsize=(14, 12))
         fig.suptitle("Tracking Diagnostics", fontsize=14)
 
-        # Scene
         axs[0, 0].plot(truth_x, truth_y, label="Truth")
         axs[0, 0].scatter(meas_x, meas_y, marker='x', label="Selected Detections")
         axs[0, 0].plot(est_x, est_y, linestyle='--', label="EKF Estimate")
         axs[0, 0].set_title("Tracking Scene")
         axs[0, 0].legend()
 
-        # Innovation
         axs[0, 1].plot(innovation_norms)
         axs[0, 1].set_title("Innovation Distance")
 
-        # Covariance
         axs[1, 0].plot(cov_trace_history)
         axs[1, 0].set_title("Covariance Trace")
 
-        # RMS error
         axs[1, 1].plot(rms_error_history)
         axs[1, 1].set_title("RMS Position Error")
 
-        # Hit ratio cumulative
         cumulative_hits = np.cumsum(
             [1 if x > 0 else 0 for x in innovation_norms]
         )
         axs[2, 0].plot(cumulative_hits)
         axs[2, 0].set_title("Cumulative Hits")
 
-        # Miss indicator
         miss_indicator = [1 if x == 0 else 0 for x in innovation_norms]
         axs[2, 1].step(range(len(miss_indicator)),
                        miss_indicator,
@@ -290,4 +272,3 @@ if __name__ == "__main__":
             measurement_model,
             plot=True
         )
-

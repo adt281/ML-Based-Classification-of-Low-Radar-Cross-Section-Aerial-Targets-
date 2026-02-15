@@ -1,81 +1,3 @@
-"""
-High-Level Radar Tracking Simulation
-
-State Vector:
-    X = [x, vx, y, vy]^T
-
-This module simulates a moving aerial target observed by a 2D radar.
-
-System Components:
-1. Motion Model (Constant Velocity):
-    - Propagates the true state over time.
-    - Adds Gaussian process noise to simulate maneuver uncertainty.
-    - Generates evolving Cartesian state [x, vx, y, vy].
-
-
-It generates these values using: 
-    Xk+1 = FXk + wk
-
-    F = constant velocity transition matrix
-    F= 1 0 0 0 
-       dt 1 0 0
-       0 0 1 0 
-       0 0 dt 1
-
-    wk= Gaussian process noise
-
-2. Radar Measurement Model:
-    - Converts Cartesian position (x, y) to polar coordinates:
-          r = sqrt(x^2 + y^2)
-          θ = arctan(y / x)
-    - Adds Gaussian measurement noise.
-    
-    - Produces radar detections (range, bearing).
-
-3. Detection Probability (Pd):
-    - Models missed detections.
-    - Lower Pd simulates stealth behavior.
-
-Target Classes:
-    - Bird: low speed, higher maneuver noise.
-    - Aircraft: high speed, smooth motion.
-    - Stealth: same motion as aircraft, lower Pd.
-
-Output:
-    - Ground truth states over time
-    - Radar detections (with missed detections)
-    - Motion and measurement models for tracking stage
-
-This module simulates the physical and sensor layer only.
-Tracking and classification are handled separately.
-"""
-
-"""
-High-Level Radar Tracking Simulation (Realistic Fighter-Class Radar)
-
-State Vector:
-    X = [x, vx, y, vy]^T
-
-This module simulates aerial targets observed by a modern 2D tracking radar.
-
-Motion Model:
-    X_{k+1} = F X_k + w_k
-    F = Constant velocity transition
-    w_k = Gaussian process noise
-
-Radar Measurement Model:
-    z = h(X) + v
-    h(X) = nonlinear Cartesian → Polar conversion
-           r = sqrt(x^2 + y^2)
-           θ = arctan2(y, x)
-    v = Gaussian measurement noise
-
-This module simulates:
-    - Target kinematics
-    - Radar detection behavior
-    - Missed detections
-Tracking and classification are handled separately.
-"""
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
@@ -130,8 +52,16 @@ RADAR_CONFIG = {
     "noise_floor": 1e-9,
     "bearing_std_deg": 1.6,
     "range_std_m": 20.0,
+
+    # Bias parameters (Phase 2)
+    "bias_snr_threshold_db": 15,
+    "range_bias_fraction": 0.03,
+    "bearing_bias_deg": 0.5,
+
+    # Clutter parameters (Phase 3)
     "clutter_birth_rate": 3,
     "clutter_velocity_std": 5.0,
+    "max_range": 15000
 }
 
 
@@ -154,156 +84,16 @@ def simulate_scene(scene_type="aircraft",
         ])
     )
 
-    truth_states = []
-    detections = []
-
-    # Target diagnostics
-    range_history = []
-    snr_history = []
-    pd_history = []
-    rcs_history = []
-    detection_binary = []
-
-    # ============================================================
-    # NOISE SCENE WITH PERSISTENT CLUTTER OBJECTS
-    # ============================================================
-
-    if scene_type == "noise":
-
-        timestamp = datetime.now()
-
-        active_clutter = []
-        clutter_x_all = []
-        clutter_y_all = []
-
-        clutter_vel_history = []
-        clutter_lifetime_history = []
-        active_counts = []
-
-        for _ in range(num_steps):
-
-            # Birth new clutter objects
-            for _ in range(np.random.poisson(RADAR_CONFIG["clutter_birth_rate"])):
-                x = np.random.uniform(-8000, 8000)
-                y = np.random.uniform(-8000, 8000)
-                vx = np.random.normal(0, RADAR_CONFIG["clutter_velocity_std"])
-                vy = np.random.normal(0, RADAR_CONFIG["clutter_velocity_std"])
-                lifetime = np.random.randint(5, 11)
-
-                active_clutter.append({
-                    "x": x,
-                    "y": y,
-                    "vx": vx,
-                    "vy": vy,
-                    "life": lifetime
-                })
-
-            step_detections = []
-            new_active = []
-
-            for obj in active_clutter:
-
-                # Update position
-                obj["x"] += obj["vx"] * dt + np.random.normal(0, 2)
-                obj["y"] += obj["vy"] * dt + np.random.normal(0, 2)
-                obj["life"] -= 1
-
-                clutter_x_all.append(obj["x"])
-                clutter_y_all.append(obj["y"])
-
-                vel_mag = np.sqrt(obj["vx"]**2 + obj["vy"]**2)
-                clutter_vel_history.append(vel_mag)
-                clutter_lifetime_history.append(obj["life"])
-
-                r = np.sqrt(obj["x"]**2 + obj["y"]**2)
-                theta = np.arctan2(obj["y"], obj["x"])
-
-                measurement_vector = StateVector([theta, r])
-
-                step_detections.append(
-                    Detection(
-                        measurement_vector,
-                        timestamp=timestamp,
-                        measurement_model=measurement_model
-                    )
-                )
-
-                if obj["life"] > 0:
-                    new_active.append(obj)
-
-            active_clutter = new_active
-            active_counts.append(len(active_clutter))
-
-            detections.append(step_detections if step_detections else None)
-            timestamp += timedelta(seconds=dt)
-
-        # ================= PLOTTING =================
-
-        if plot or diagnostics:
-
-            fig, axs = plt.subplots(3, 2, figsize=(14, 12))
-            fig.suptitle("Advanced Clutter Diagnostics", fontsize=14)
-
-            # Spatial distribution
-            axs[0, 0].scatter(clutter_x_all, clutter_y_all, s=10)
-            axs[0, 0].set_title("Persistent Clutter Motion")
-
-            # Velocity magnitude
-            axs[0, 1].plot(clutter_vel_history)
-            axs[0, 1].set_title("Clutter Velocity Magnitude")
-
-            # Lifetime histogram
-            axs[1, 0].hist(clutter_lifetime_history, bins=10)
-            axs[1, 0].set_title("Clutter Lifetime Distribution")
-
-            # Active clutter count
-            axs[1, 1].plot(active_counts)
-            axs[1, 1].set_title("Active Clutter Per Scan")
-
-            # Density map
-            heatmap, _, _ = np.histogram2d(
-                clutter_x_all,
-                clutter_y_all,
-                bins=50
-            )
-            axs[2, 0].imshow(heatmap.T, origin='lower')
-            axs[2, 0].set_title("Clutter Density Map")
-
-            axs[2, 1].axis('off')
-
-            for ax in axs.flat:
-                ax.grid(True)
-
-            plt.tight_layout()
-            plt.show()
-
-        metadata = {
-            "stage1": "non_credible",
-            "stage2": None,
-            "stage3": None
-        }
-
-        return truth_states, detections, None, measurement_model, metadata
-
-
-    # ============================================================
-    # REAL TARGET SCENE
-    # ============================================================
-
     config = TARGET_CONFIG[scene_type]
 
-    speed = config["speed"]
-    process_noise = config["process_noise"]
-    rcs_mean = config["rcs"]
-
     transition_model = CombinedLinearGaussianTransitionModel([
-        ConstantVelocity(process_noise),
-        ConstantVelocity(process_noise)
+        ConstantVelocity(config["process_noise"]),
+        ConstantVelocity(config["process_noise"])
     ])
 
     heading = np.random.uniform(-np.pi/6, np.pi/6)
-    vx = speed * np.cos(heading)
-    vy = speed * np.sin(heading)
+    vx = config["speed"] * np.cos(heading)
+    vy = config["speed"] * np.sin(heading)
 
     truth = GaussianState(
         StateVector([0, vx, 0, vy]),
@@ -311,12 +101,21 @@ def simulate_scene(scene_type="aircraft",
         timestamp=datetime.now()
     )
 
+    truth_states = []
+    detections = []
+
+    # Diagnostics
     truth_x, truth_y = [], []
     meas_x, meas_y = [], []
-
-    # NEW: measurement noise tracking
+    snr_history, pd_history, rcs_history = [], [], []
+    detection_binary = []
     range_noise_std_history = []
     bearing_noise_std_history = []
+    range_bias_history = []
+    bearing_bias_history = []
+
+    # Persistent clutter store
+    persistent_clutter = []
 
     for _ in range(num_steps):
 
@@ -330,58 +129,56 @@ def simulate_scene(scene_type="aircraft",
 
         R = np.sqrt(x**2 + y**2) + 1e-6
 
-        # ---------------------------
-        # Radar Equation + SNR
-        # ---------------------------
-        rcs_fluct = np.random.exponential(scale=rcs_mean)
+        # ---------------- Radar Equation ----------------
+        rcs_fluct = np.random.exponential(scale=config["rcs"])
         received_power = (RADAR_CONFIG["Pt"] * rcs_fluct) / (R**4)
         SNR_linear = received_power / RADAR_CONFIG["noise_floor"]
         SNR_dB = 10 * np.log10(SNR_linear + 1e-12)
-
         Pd = 1 / (1 + np.exp(-0.6 * (SNR_dB - 10)))
 
-        range_history.append(R)
         snr_history.append(SNR_dB)
         pd_history.append(Pd)
         rcs_history.append(rcs_fluct)
 
-        detected = False
         step_detections = []
+
+        # ============================================================
+        # TRUE TARGET DETECTION (Phase 1 + 2)
+        # ============================================================
 
         if np.random.rand() <= Pd:
 
-            detected = True
-
-            # ------------------------------------------------
-            # 🔴 SNR-dependent measurement noise
-            # ------------------------------------------------
-
-            # Avoid extreme scaling
             SNR_linear_safe = max(SNR_linear, 1e-6)
 
             base_range_std = RADAR_CONFIG["range_std_m"]
             base_bearing_std = np.radians(RADAR_CONFIG["bearing_std_deg"])
 
-            # Noise grows when SNR drops
             range_std = base_range_std * np.sqrt(10 / SNR_linear_safe)
             bearing_std = base_bearing_std * np.sqrt(10 / SNR_linear_safe)
 
             range_noise_std_history.append(range_std)
             bearing_noise_std_history.append(np.degrees(bearing_std))
 
-            # Ideal measurement
             true_range = R
             true_bearing = np.arctan2(y, x)
 
-            # Add SNR-scaled noise
-            noisy_range = true_range + np.random.normal(0, range_std)
-            noisy_bearing = true_bearing + np.random.normal(0, bearing_std)
+            # Phase 2 Bias
+            if SNR_dB < RADAR_CONFIG["bias_snr_threshold_db"]:
+                range_bias = RADAR_CONFIG["range_bias_fraction"] * true_range
+                bearing_bias = np.radians(RADAR_CONFIG["bearing_bias_deg"])
+            else:
+                range_bias = 0
+                bearing_bias = 0
 
-            measurement_vector = StateVector([noisy_bearing, noisy_range])
+            range_bias_history.append(range_bias)
+            bearing_bias_history.append(np.degrees(bearing_bias))
+
+            noisy_range = true_range + range_bias + np.random.normal(0, range_std)
+            noisy_bearing = true_bearing + bearing_bias + np.random.normal(0, bearing_std)
 
             step_detections.append(
                 Detection(
-                    measurement_vector,
+                    StateVector([noisy_bearing, noisy_range]),
                     timestamp=truth.timestamp,
                     measurement_model=measurement_model
                 )
@@ -390,11 +187,85 @@ def simulate_scene(scene_type="aircraft",
             meas_x.append(noisy_range * np.cos(noisy_bearing))
             meas_y.append(noisy_range * np.sin(noisy_bearing))
 
+            detection_binary.append(1)
+
         else:
+            detection_binary.append(0)
             range_noise_std_history.append(0)
             bearing_noise_std_history.append(0)
+            range_bias_history.append(0)
+            bearing_bias_history.append(0)
 
-        detection_binary.append(1 if detected else 0)
+        # ============================================================
+        # BACKGROUND CLUTTER (Range-scaled)
+        # ============================================================
+
+        clutter_rate = 2 + 6 * (R / RADAR_CONFIG["max_range"])
+        clutter_count = np.random.poisson(clutter_rate)
+
+        for _ in range(clutter_count):
+            cr = np.random.uniform(0, RADAR_CONFIG["max_range"])
+            cb = np.random.uniform(-np.pi, np.pi)
+            step_detections.append(
+                Detection(
+                    StateVector([cb, cr]),
+                    timestamp=truth.timestamp,
+                    measurement_model=measurement_model
+                )
+            )
+
+        # ============================================================
+        # LOCAL COMPETITION CLUTTER (Ambiguity)
+        # ============================================================
+
+        if np.random.rand() < 0.5:
+            for _ in range(np.random.randint(1, 3)):
+                local_range = R + np.random.normal(0, 200)
+                local_bearing = np.arctan2(y, x) + np.random.normal(0, np.radians(2))
+                step_detections.append(
+                    Detection(
+                        StateVector([local_bearing, local_range]),
+                        timestamp=truth.timestamp,
+                        measurement_model=measurement_model
+                    )
+                )
+
+        # ============================================================
+        # PERSISTENT CLUTTER (Drifting slow objects)
+        # ============================================================
+
+        # Birth
+        for _ in range(np.random.poisson(RADAR_CONFIG["clutter_birth_rate"])):
+            persistent_clutter.append({
+                "x": np.random.uniform(-8000, 8000),
+                "y": np.random.uniform(-8000, 8000),
+                "vx": np.random.normal(0, RADAR_CONFIG["clutter_velocity_std"]),
+                "vy": np.random.normal(0, RADAR_CONFIG["clutter_velocity_std"]),
+                "life": np.random.randint(5, 10)
+            })
+
+        new_persistent = []
+
+        for obj in persistent_clutter:
+            obj["x"] += obj["vx"] * dt + np.random.normal(0, 2)
+            obj["y"] += obj["vy"] * dt + np.random.normal(0, 2)
+            obj["life"] -= 1
+
+            r = np.sqrt(obj["x"]**2 + obj["y"]**2)
+            theta = np.arctan2(obj["y"], obj["x"])
+
+            step_detections.append(
+                Detection(
+                    StateVector([theta, r]),
+                    timestamp=truth.timestamp,
+                    measurement_model=measurement_model
+                )
+            )
+
+            if obj["life"] > 0:
+                new_persistent.append(obj)
+
+        persistent_clutter = new_persistent
 
         detections.append(step_detections if step_detections else None)
 
@@ -408,7 +279,10 @@ def simulate_scene(scene_type="aircraft",
             timestamp=truth.timestamp + timedelta(seconds=dt)
         )
 
-    # Target diagnostics
+    # ============================================================
+    # Diagnostics Plot
+    # ============================================================
+
     if plot or diagnostics:
 
         fig, axs = plt.subplots(3, 2, figsize=(14, 12))
@@ -431,13 +305,13 @@ def simulate_scene(scene_type="aircraft",
                        detection_binary,
                        where='mid')
         axs[2, 0].set_title("Detection Timeline")
-        axs[2, 0].set_ylim(-0.1, 1.1)
 
         axs[2, 1].plot(range_noise_std_history, label="Range Noise Std")
         axs[2, 1].plot(bearing_noise_std_history, label="Bearing Noise Std (deg)")
-        axs[2, 1].set_title("SNR-Dependent Measurement Noise")
+        axs[2, 1].plot(range_bias_history, linestyle='--', label="Range Bias")
+        axs[2, 1].plot(bearing_bias_history, linestyle='--', label="Bearing Bias (deg)")
+        axs[2, 1].set_title("SNR-Dependent Noise + Bias")
         axs[2, 1].legend()
-
 
         for ax in axs.flat:
             ax.grid(True)
@@ -455,6 +329,6 @@ def simulate_scene(scene_type="aircraft",
 
 
 if __name__ == "__main__":
-    for target in ["aircraft", "stealth", "bird", "noise"]:
+    for target in ["aircraft", "stealth", "bird"]:
         print(f"\nRunning simulation for: {target}")
         simulate_scene(scene_type=target, plot=True, diagnostics=True)
