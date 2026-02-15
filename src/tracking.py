@@ -63,14 +63,9 @@ def select_best_detection(prediction,
     if len(valid_detections) == 0:
         return None, None
 
-    # Sort detections by Mahalanobis distance
     sorted_indices = np.argsort(mahalanobis_distances)
     best_idx = sorted_indices[0]
     selected_idx = best_idx
-
-    # --------------------------------------------------------
-    # Ambiguity + SNR-based wrong association probability
-    # --------------------------------------------------------
 
     if len(sorted_indices) > 1:
 
@@ -78,20 +73,16 @@ def select_best_detection(prediction,
 
         d1 = mahalanobis_distances[best_idx]
         d2 = mahalanobis_distances[second_idx]
-
         current_snr_db = snr_values[best_idx]
 
-        # Ambiguity factor (close distances = ambiguous)
         ambiguity_threshold = 2.0
         ambiguity_factor = max(0, 1 - abs(d2 - d1) / ambiguity_threshold)
         ambiguity_factor = np.clip(ambiguity_factor, 0, 1)
 
-        # SNR factor (low SNR = weak discrimination)
         snr_threshold_db = 15
         snr_factor = max(0, 1 - (current_snr_db / snr_threshold_db))
         snr_factor = np.clip(snr_factor, 0, 1)
 
-        # Combined probability (bounded)
         P_wrong = 0.6 * (0.5 * ambiguity_factor + 0.5 * snr_factor)
 
         if np.random.rand() < P_wrong:
@@ -135,6 +126,9 @@ def run_tracker(truth_states,
     est_x, est_y = [], []
     meas_x, meas_y = [], []
 
+    # NEW: store all detections for plotting
+    all_meas_x, all_meas_y = [], []
+
     innovation_norms = []
     cov_trace_history = []
     rms_error_history = []
@@ -154,6 +148,13 @@ def run_tracker(truth_states,
             track[-1],
             timestamp=truth.timestamp
         )
+
+        # Store ALL detections for visualization
+        if detection_list is not None:
+            for det in detection_list:
+                dx, dy = polar_to_cartesian(det)
+                all_meas_x.append(dx)
+                all_meas_y.append(dy)
 
         detection, dist = select_best_detection(
             prediction,
@@ -213,9 +214,17 @@ def run_tracker(truth_states,
         fig, axs = plt.subplots(3, 2, figsize=(14, 12))
         fig.suptitle("Tracking Diagnostics", fontsize=14)
 
+        # Scene
         axs[0, 0].plot(truth_x, truth_y, label="Truth")
-        axs[0, 0].scatter(meas_x, meas_y, marker='x', label="Selected Detections")
-        axs[0, 0].plot(est_x, est_y, linestyle='--', label="EKF Estimate")
+        axs[0, 0].scatter(all_meas_x, all_meas_y,
+                          s=10, alpha=0.2, color='gray',
+                          label="All Detections")
+        axs[0, 0].scatter(meas_x, meas_y,
+                          marker='x', color='blue',
+                          label="Selected Detections")
+        axs[0, 0].plot(est_x, est_y,
+                       linestyle='--', color='orange',
+                       label="EKF Estimate")
         axs[0, 0].set_title("Tracking Scene")
         axs[0, 0].legend()
 
