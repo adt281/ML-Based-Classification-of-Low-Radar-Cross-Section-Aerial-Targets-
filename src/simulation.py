@@ -2,10 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 
-from stonesoup.models.transition.linear import CombinedLinearGaussianTransitionModel
-from stonesoup.models.transition.linear import ConstantVelocity
 from stonesoup.models.measurement.nonlinear import CartesianToBearingRange
-
 from stonesoup.types.state import GaussianState
 from stonesoup.types.array import StateVector
 from stonesoup.types.detection import Detection
@@ -41,10 +38,9 @@ MANEUVER_CONFIG = {
         "maneuver_min_deg": 20,
         "maneuver_max_deg": 60,
         "maneuver_duration_min": 3,
-        "maneuver_duration_max": 8
+        "maneuver_duration_max": 10
     }
 }
-
 
 # ============================================================
 # Radar Configuration
@@ -53,19 +49,18 @@ MANEUVER_CONFIG = {
 RADAR_CONFIG = {
     "Pt": 1e9,
     "noise_floor": 1e-9,
-
     "bearing_std_deg": 1.6,
     "range_std_m": 20.0,
     "max_range": 15000,
 
-    "cell_range_m": 300,
-    "cell_bearing_deg": 3,
+    # Grid resolution
+    "num_range_bins": 200,
+    "num_bearing_bins": 180,
 
-    # CFAR parameters
-    "cfar_training_cells": 8,
-    "cfar_guard_cells": 2,
+    # 2D CFAR
+    "cfar_training": 6,
+    "cfar_guard": 2,
     "cfar_scale_factor": 4.0
-    
 }
 
 
@@ -111,6 +106,14 @@ def simulate_scene(scene_type="aircraft",
     maneuver_steps_remaining = 0
     current_turn_rate = 0.0
 
+    # Precompute grid
+    max_range = RADAR_CONFIG["max_range"]
+    Nr = RADAR_CONFIG["num_range_bins"]
+    Nb = RADAR_CONFIG["num_bearing_bins"]
+
+    range_bins = np.linspace(0, max_range, Nr)
+    bearing_bins = np.linspace(-np.pi, np.pi, Nb)
+
     for step in range(num_steps):
 
         truth_states.append(truth)
@@ -118,19 +121,16 @@ def simulate_scene(scene_type="aircraft",
         x = truth.state_vector[0, 0]
         y = truth.state_vector[2, 0]
         R = np.sqrt(x**2 + y**2) + 1e-6
+        B = np.arctan2(y, x)
 
         truth_x.append(x)
         truth_y.append(y)
 
         # ============================================================
-        # RANGE POWER PROFILE (Proper CFAR domain)
+        # 2D POWER MAP INITIALIZATION
         # ============================================================
 
-        num_bins = 200
-        max_range = RADAR_CONFIG["max_range"]
-        range_bins = np.linspace(0, max_range, num_bins)
-        power_profile = np.ones(num_bins) * RADAR_CONFIG["noise_floor"]
-        bearing_profile = np.zeros(num_bins)
+        power_map = np.ones((Nr, Nb)) * RADAR_CONFIG["noise_floor"]
 
         # ============================================================
         # TARGET INJECTION
@@ -138,14 +138,14 @@ def simulate_scene(scene_type="aircraft",
 
         rcs_fluct = np.random.exponential(scale=config["rcs"])
         target_power = (RADAR_CONFIG["Pt"] * rcs_fluct) / (R**4)
-        target_snr = target_power / RADAR_CONFIG["noise_floor"]
-        target_snr_db = 10 * np.log10(target_snr + 1e-12)
 
-        snr_history.append(target_snr_db)
+        snr = target_power / RADAR_CONFIG["noise_floor"]
+        snr_history.append(10 * np.log10(snr + 1e-12))
 
-        target_bin = np.argmin(np.abs(range_bins - R))
-        power_profile[target_bin] += target_power
-        bearing_profile[target_bin] = np.arctan2(y, x)
+        r_idx = np.argmin(np.abs(range_bins - R))
+        b_idx = np.argmin(np.abs(bearing_bins - B))
+
+        power_map[r_idx, b_idx] += target_power
 
         # ============================================================
         # CLUTTER INJECTION
@@ -156,40 +156,49 @@ def simulate_scene(scene_type="aircraft",
         clutter_count_history.append(clutter_count)
 
         for _ in range(clutter_count):
-
             cr = max_range * np.sqrt(np.random.rand())
             cb = np.random.uniform(-np.pi, np.pi)
 
             clutter_rcs = np.random.gamma(shape=0.8, scale=0.5)
             clutter_power = (RADAR_CONFIG["Pt"] * clutter_rcs) / (cr**4 + 1e-6)
 
-            clutter_bin = np.argmin(np.abs(range_bins - cr))
-            power_profile[clutter_bin] += clutter_power
-            bearing_profile[clutter_bin] = cb
+            r_i = np.argmin(np.abs(range_bins - cr))
+            b_i = np.argmin(np.abs(bearing_bins - cb))
+
+            power_map[r_i, b_i] += clutter_power
 
             clutter_x_all.append(cr * np.cos(cb))
             clutter_y_all.append(cr * np.sin(cb))
 
         # ============================================================
-        # CA-CFAR
+        # TRUE 2D CA-CFAR
         # ============================================================
 
-        T = RADAR_CONFIG["cfar_training_cells"]
-        G = RADAR_CONFIG["cfar_guard_cells"]
+        T = RADAR_CONFIG["cfar_training"]
+        G = RADAR_CONFIG["cfar_guard"]
         alpha = RADAR_CONFIG["cfar_scale_factor"]
 
-        detected_bins = []
+        detected_cells = []
 
-        for i in range(T+G, num_bins-T-G):
+        for i in range(T+G, Nr-T-G):
+            for j in range(T+G, Nb-T-G):
 
-            leading = power_profile[i-T-G:i-G]
-            trailing = power_profile[i+G+1:i+G+T+1]
+                cut_power = power_map[i, j]
 
-            noise_est = np.mean(np.concatenate((leading, trailing)))
-            threshold = alpha * noise_est
+                window = power_map[i-T-G:i+T+G+1,
+                                   j-T-G:j+T+G+1]
 
-            if power_profile[i] > threshold:
-                detected_bins.append(i)
+                guard = power_map[i-G:i+G+1,
+                                  j-G:j+G+1]
+
+                training_cells = np.sum(window) - np.sum(guard)
+                num_training = window.size - guard.size
+
+                noise_est = training_cells / max(num_training, 1)
+                threshold = alpha * noise_est
+
+                if cut_power > threshold:
+                    detected_cells.append((i, j))
 
         # ============================================================
         # MEASUREMENT GENERATION
@@ -197,16 +206,15 @@ def simulate_scene(scene_type="aircraft",
 
         step_detections = []
 
-        for i in detected_bins:
+        for i, j in detected_cells:
 
             det_range = range_bins[i]
-            det_bearing = bearing_profile[i]
+            det_bearing = bearing_bins[j]
 
-            snr_linear = power_profile[i] / RADAR_CONFIG["noise_floor"]
+            snr_linear = power_map[i, j] / RADAR_CONFIG["noise_floor"]
 
             range_std = RADAR_CONFIG["range_std_m"] * \
                         np.sqrt(10 / max(snr_linear, 1e-6))
-
             bearing_std = np.radians(RADAR_CONFIG["bearing_std_deg"]) * \
                           np.sqrt(10 / max(snr_linear, 1e-6))
 
@@ -227,13 +235,8 @@ def simulate_scene(scene_type="aircraft",
         detections.append(step_detections if step_detections else None)
 
         # ============================================================
-        # MOTION PROPAGATION (unchanged)
+        # MOTION PROPAGATION (UNCHANGED)
         # ============================================================
-
-        x = truth.state_vector[0, 0]
-        vx = truth.state_vector[1, 0]
-        y = truth.state_vector[2, 0]
-        vy = truth.state_vector[3, 0]
 
         speed = np.sqrt(vx**2 + vy**2)
         heading = np.arctan2(vy, vx)
