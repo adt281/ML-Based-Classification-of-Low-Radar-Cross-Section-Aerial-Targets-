@@ -40,8 +40,8 @@ MANEUVER_CONFIG = {
         "maneuver_prob": 0.15,
         "maneuver_min_deg": 20,
         "maneuver_max_deg": 60,
-        "maneuver_duration_min": 1,
-        "maneuver_duration_max": 3
+        "maneuver_duration_min": 3,
+        "maneuver_duration_max": 8
     }
 }
 
@@ -53,12 +53,19 @@ MANEUVER_CONFIG = {
 RADAR_CONFIG = {
     "Pt": 1e9,
     "noise_floor": 1e-9,
-    "detection_threshold_db": 13,
+
     "bearing_std_deg": 1.6,
     "range_std_m": 20.0,
     "max_range": 15000,
+
     "cell_range_m": 300,
-    "cell_bearing_deg": 3
+    "cell_bearing_deg": 3,
+
+    # CFAR parameters
+    "cfar_training_cells": 8,
+    "cfar_guard_cells": 2,
+    "cfar_scale_factor": 4.0
+    
 }
 
 
@@ -82,11 +89,6 @@ def simulate_scene(scene_type="aircraft",
 
     config = TARGET_CONFIG[scene_type]
 
-    transition_model = CombinedLinearGaussianTransitionModel([
-        ConstantVelocity(config["process_noise"]),
-        ConstantVelocity(config["process_noise"])
-    ])
-
     heading = np.random.uniform(-np.pi/6, np.pi/6)
     vx = config["speed"] * np.cos(heading)
     vy = config["speed"] * np.sin(heading)
@@ -106,10 +108,8 @@ def simulate_scene(scene_type="aircraft",
     snr_history = []
     clutter_count_history = []
 
-
     maneuver_steps_remaining = 0
-    current_turn_rate = 0.0  # rad/sec
-
+    current_turn_rate = 0.0
 
     for step in range(num_steps):
 
@@ -122,10 +122,18 @@ def simulate_scene(scene_type="aircraft",
         truth_x.append(x)
         truth_y.append(y)
 
-        step_returns = []
+        # ============================================================
+        # RANGE POWER PROFILE (Proper CFAR domain)
+        # ============================================================
+
+        num_bins = 200
+        max_range = RADAR_CONFIG["max_range"]
+        range_bins = np.linspace(0, max_range, num_bins)
+        power_profile = np.ones(num_bins) * RADAR_CONFIG["noise_floor"]
+        bearing_profile = np.zeros(num_bins)
 
         # ============================================================
-        # TARGET RETURN
+        # TARGET INJECTION
         # ============================================================
 
         rcs_fluct = np.random.exponential(scale=config["rcs"])
@@ -135,99 +143,75 @@ def simulate_scene(scene_type="aircraft",
 
         snr_history.append(target_snr_db)
 
-        step_returns.append({
-            "range": R,
-            "bearing": np.arctan2(y, x),
-            "snr_db": target_snr_db
-        })
+        target_bin = np.argmin(np.abs(range_bins - R))
+        power_profile[target_bin] += target_power
+        bearing_profile[target_bin] = np.arctan2(y, x)
 
         # ============================================================
-        # CLUTTER RETURNS
+        # CLUTTER INJECTION
         # ============================================================
 
-        clutter_rate = 2 + 6 * (R / RADAR_CONFIG["max_range"])
+        clutter_rate = 2 + 10 * (R / max_range)**2
         clutter_count = np.random.poisson(clutter_rate)
         clutter_count_history.append(clutter_count)
 
         for _ in range(clutter_count):
 
-            cr = np.random.uniform(0, RADAR_CONFIG["max_range"])
+            cr = max_range * np.sqrt(np.random.rand())
             cb = np.random.uniform(-np.pi, np.pi)
 
-            clutter_rcs = np.random.exponential(scale=1.0)
+            clutter_rcs = np.random.gamma(shape=0.8, scale=0.5)
             clutter_power = (RADAR_CONFIG["Pt"] * clutter_rcs) / (cr**4 + 1e-6)
-            clutter_snr = clutter_power / RADAR_CONFIG["noise_floor"]
-            clutter_snr_db = 10 * np.log10(clutter_snr + 1e-12)
+
+            clutter_bin = np.argmin(np.abs(range_bins - cr))
+            power_profile[clutter_bin] += clutter_power
+            bearing_profile[clutter_bin] = cb
 
             clutter_x_all.append(cr * np.cos(cb))
             clutter_y_all.append(cr * np.sin(cb))
 
-            step_returns.append({
-                "range": cr,
-                "bearing": cb,
-                "snr_db": clutter_snr_db
-            })
-
         # ============================================================
-        # THRESHOLDING
+        # CA-CFAR
         # ============================================================
 
-        valid_returns = [
-            r for r in step_returns
-            if r["snr_db"] >= RADAR_CONFIG["detection_threshold_db"]
-        ]
+        T = RADAR_CONFIG["cfar_training_cells"]
+        G = RADAR_CONFIG["cfar_guard_cells"]
+        alpha = RADAR_CONFIG["cfar_scale_factor"]
+
+        detected_bins = []
+
+        for i in range(T+G, num_bins-T-G):
+
+            leading = power_profile[i-T-G:i-G]
+            trailing = power_profile[i+G+1:i+G+T+1]
+
+            noise_est = np.mean(np.concatenate((leading, trailing)))
+            threshold = alpha * noise_est
+
+            if power_profile[i] > threshold:
+                detected_bins.append(i)
 
         # ============================================================
-        # LOCAL COMPETITION
-        # ============================================================
-
-        survivors = []
-        used = np.zeros(len(valid_returns), dtype=bool)
-
-        cell_range = RADAR_CONFIG["cell_range_m"]
-        cell_bearing = np.radians(RADAR_CONFIG["cell_bearing_deg"])
-
-        for i, r in enumerate(valid_returns):
-            if used[i]:
-                continue
-
-            competitors = [i]
-
-            for j in range(i+1, len(valid_returns)):
-                if used[j]:
-                    continue
-
-                dr = abs(valid_returns[j]["range"] - r["range"])
-                db = abs(valid_returns[j]["bearing"] - r["bearing"])
-
-                if dr < cell_range and db < cell_bearing:
-                    competitors.append(j)
-
-            best_idx = max(competitors,
-                           key=lambda k: valid_returns[k]["snr_db"])
-
-            for k in competitors:
-                used[k] = True
-
-            survivors.append(valid_returns[best_idx])
-
-        # ============================================================
-        # MEASUREMENT GENERATION (NO TYPE LEAKAGE)
+        # MEASUREMENT GENERATION
         # ============================================================
 
         step_detections = []
 
-        for ret in survivors:
+        for i in detected_bins:
 
-            snr_linear = 10 ** (ret["snr_db"] / 10)
+            det_range = range_bins[i]
+            det_bearing = bearing_profile[i]
+
+            snr_linear = power_profile[i] / RADAR_CONFIG["noise_floor"]
 
             range_std = RADAR_CONFIG["range_std_m"] * \
                         np.sqrt(10 / max(snr_linear, 1e-6))
+
             bearing_std = np.radians(RADAR_CONFIG["bearing_std_deg"]) * \
                           np.sqrt(10 / max(snr_linear, 1e-6))
 
-            noisy_range = ret["range"] + np.random.normal(0, range_std)
-            noisy_bearing = ret["bearing"] + np.random.normal(0, bearing_std)
+            noisy_range = det_range + np.random.normal(0, range_std)
+            noisy_bearing = det_bearing + np.random.normal(0, bearing_std)
 
             detect_x_all.append(noisy_range * np.cos(noisy_bearing))
             detect_y_all.append(noisy_range * np.sin(noisy_bearing))
@@ -236,34 +220,16 @@ def simulate_scene(scene_type="aircraft",
                 Detection(
                     StateVector([noisy_bearing, noisy_range]),
                     timestamp=truth.timestamp,
-                    measurement_model=measurement_model,
-                    metadata={"snr_db": ret["snr_db"]}
+                    measurement_model=measurement_model
                 )
             )
 
         detections.append(step_detections if step_detections else None)
 
         # ============================================================
-        # Coordinated Turn Truth Propagation
+        # MOTION PROPAGATION (unchanged)
         # ============================================================
 
-        # Extract state
-        x = truth.state_vector[0, 0]
-        vx = truth.state_vector[1, 0]
-        y = truth.state_vector[2, 0]
-        vy = truth.state_vector[3, 0]
-
-        speed = np.sqrt(vx**2 + vy**2)
-
-        # Decide if new maneuver starts
-        
-        # ============================================================
-        # Maneuver Configuration Per Target Type
-        # ============================================================
-
-        maneuver_cfg = MANEUVER_CONFIG[scene_type]
-
-        # Extract current state
         x = truth.state_vector[0, 0]
         vx = truth.state_vector[1, 0]
         y = truth.state_vector[2, 0]
@@ -272,9 +238,7 @@ def simulate_scene(scene_type="aircraft",
         speed = np.sqrt(vx**2 + vy**2)
         heading = np.arctan2(vy, vx)
 
-        # ------------------------------------------------------------
-        # Decide if new maneuver starts
-        # ------------------------------------------------------------
+        maneuver_cfg = MANEUVER_CONFIG[scene_type]
 
         if maneuver_steps_remaining == 0:
             if np.random.rand() < maneuver_cfg["maneuver_prob"]:
@@ -282,57 +246,38 @@ def simulate_scene(scene_type="aircraft",
                     maneuver_cfg["maneuver_duration_min"],
                     maneuver_cfg["maneuver_duration_max"]
                 )
-
                 turn_deg = np.random.uniform(
                     maneuver_cfg["maneuver_min_deg"],
                     maneuver_cfg["maneuver_max_deg"]
                 )
-
                 turn_sign = np.random.choice([-1, 1])
                 current_turn_rate = np.radians(turn_deg) * turn_sign
-
-        # ------------------------------------------------------------
-        # Apply maneuver if active
-        # ------------------------------------------------------------
 
         if maneuver_steps_remaining > 0:
             heading += current_turn_rate * dt
             maneuver_steps_remaining -= 1
 
-        # ------------------------------------------------------------
-        # Bird-specific speed fluctuation (biological realism)
-        # ------------------------------------------------------------
-
         if scene_type == "bird":
             speed += np.random.normal(0, 2.0)
-            speed = max(speed, 5.0)  # prevent negative/near-zero speed
-
-        # ------------------------------------------------------------
-        # Recompute velocity from updated heading & speed
-        # ------------------------------------------------------------
+            speed = max(speed, 5.0)
 
         vx = speed * np.cos(heading)
         vy = speed * np.sin(heading)
 
-        # Small process noise (environmental disturbance)
         vx += np.random.normal(0, config["process_noise"])
         vy += np.random.normal(0, config["process_noise"])
 
-        # Position update
         x += vx * dt
         y += vy * dt
 
-        # Update truth state
         truth = GaussianState(
             StateVector([x, vx, y, vy]),
             truth.covar,
             timestamp=truth.timestamp + timedelta(seconds=dt)
         )
 
-
-
     # ============================================================
-    # PLOTTING
+    # PLOTTING (UNCHANGED)
     # ============================================================
 
     if plot:
@@ -366,8 +311,8 @@ def simulate_scene(scene_type="aircraft",
         plt.tight_layout()
         plt.show()
 
-    return truth_states, detections, transition_model, measurement_model, {}
-    
+    return truth_states, detections, None, measurement_model, {}
+
 
 if __name__ == "__main__":
     for target in ["aircraft", "stealth", "bird"]:
