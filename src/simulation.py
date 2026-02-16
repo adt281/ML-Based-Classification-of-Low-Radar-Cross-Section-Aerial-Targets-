@@ -13,7 +13,7 @@ from stonesoup.types.detection import Detection
 # ============================================================
 
 TARGET_CONFIG = {
-    "bird": {"speed": 20.0, "process_noise": 2.0, "rcs": 0.01},
+    "bird": {"speed": 50, "process_noise": 2.0, "rcs": 0.01},
     "aircraft": {"speed": 250.0, "process_noise": 0.1, "rcs": 5.0},
     "stealth": {"speed": 250.0, "process_noise": 0.1, "rcs": 0.5},
 }
@@ -34,11 +34,11 @@ MANEUVER_CONFIG = {
         "maneuver_duration_max": 10
     },
     "bird": {
-        "maneuver_prob": 0.15,
-        "maneuver_min_deg": 20,
-        "maneuver_max_deg": 60,
-        "maneuver_duration_min": 3,
-        "maneuver_duration_max": 10
+        "maneuver_prob": 0.4,
+        "maneuver_min_deg": 5,
+        "maneuver_max_deg": 25,
+        "maneuver_duration_min": 1,
+        "maneuver_duration_max": 4
     }
 }
 
@@ -238,8 +238,13 @@ def simulate_scene(scene_type="aircraft",
         # MOTION PROPAGATION (UNCHANGED)
         # ============================================================
 
+        # Extract fresh velocity from truth state
+        vx = truth.state_vector[1, 0]
+        vy = truth.state_vector[3, 0]
+
         speed = np.sqrt(vx**2 + vy**2)
         heading = np.arctan2(vy, vx)
+
 
         maneuver_cfg = MANEUVER_CONFIG[scene_type]
 
@@ -257,7 +262,7 @@ def simulate_scene(scene_type="aircraft",
                 current_turn_rate = np.radians(turn_deg) * turn_sign
 
         if maneuver_steps_remaining > 0:
-            heading += current_turn_rate * dt
+            heading += np.radians(np.random.uniform(-20, 20))
             maneuver_steps_remaining -= 1
 
         if scene_type == "bird":
@@ -284,9 +289,16 @@ def simulate_scene(scene_type="aircraft",
     # ============================================================
 
     if plot:
+        
+        
 
         fig, axs = plt.subplots(2, 2, figsize=(14, 10))
         fig.suptitle(f"Radar Diagnostics - {scene_type}", fontsize=14)
+
+        if scene_type == "bird":
+            margin = 5000
+            axs[0, 0].set_xlim(min(truth_x)-margin, max(truth_x)+margin)
+            axs[0, 0].set_ylim(min(truth_y)-margin, max(truth_y)+margin)
 
         axs[0, 0].plot(truth_x, truth_y, linewidth=2, label="Truth")
         axs[0, 0].scatter(clutter_x_all, clutter_y_all,
