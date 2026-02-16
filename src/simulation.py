@@ -21,6 +21,30 @@ TARGET_CONFIG = {
     "stealth": {"speed": 250.0, "process_noise": 0.1, "rcs": 0.5},
 }
 
+MANEUVER_CONFIG = {
+    "aircraft": {
+        "maneuver_prob": 0.05,
+        "maneuver_min_deg": 3,
+        "maneuver_max_deg": 6,
+        "maneuver_duration_min": 8,
+        "maneuver_duration_max": 12
+    },
+    "stealth": {
+        "maneuver_prob": 0.04,
+        "maneuver_min_deg": 4,
+        "maneuver_max_deg": 8,
+        "maneuver_duration_min": 6,
+        "maneuver_duration_max": 10
+    },
+    "bird": {
+        "maneuver_prob": 0.15,
+        "maneuver_min_deg": 20,
+        "maneuver_max_deg": 60,
+        "maneuver_duration_min": 1,
+        "maneuver_duration_max": 3
+    }
+}
+
 
 # ============================================================
 # Radar Configuration
@@ -81,6 +105,11 @@ def simulate_scene(scene_type="aircraft",
     detect_x_all, detect_y_all = [], []
     snr_history = []
     clutter_count_history = []
+
+
+    maneuver_steps_remaining = 0
+    current_turn_rate = 0.0  # rad/sec
+
 
     for step in range(num_steps):
 
@@ -214,15 +243,93 @@ def simulate_scene(scene_type="aircraft",
 
         detections.append(step_detections if step_detections else None)
 
+        # ============================================================
+        # Coordinated Turn Truth Propagation
+        # ============================================================
+
+        # Extract state
+        x = truth.state_vector[0, 0]
+        vx = truth.state_vector[1, 0]
+        y = truth.state_vector[2, 0]
+        vy = truth.state_vector[3, 0]
+
+        speed = np.sqrt(vx**2 + vy**2)
+
+        # Decide if new maneuver starts
+        
+        # ============================================================
+        # Maneuver Configuration Per Target Type
+        # ============================================================
+
+        maneuver_cfg = MANEUVER_CONFIG[scene_type]
+
+        # Extract current state
+        x = truth.state_vector[0, 0]
+        vx = truth.state_vector[1, 0]
+        y = truth.state_vector[2, 0]
+        vy = truth.state_vector[3, 0]
+
+        speed = np.sqrt(vx**2 + vy**2)
+        heading = np.arctan2(vy, vx)
+
+        # ------------------------------------------------------------
+        # Decide if new maneuver starts
+        # ------------------------------------------------------------
+
+        if maneuver_steps_remaining == 0:
+            if np.random.rand() < maneuver_cfg["maneuver_prob"]:
+                maneuver_steps_remaining = np.random.randint(
+                    maneuver_cfg["maneuver_duration_min"],
+                    maneuver_cfg["maneuver_duration_max"]
+                )
+
+                turn_deg = np.random.uniform(
+                    maneuver_cfg["maneuver_min_deg"],
+                    maneuver_cfg["maneuver_max_deg"]
+                )
+
+                turn_sign = np.random.choice([-1, 1])
+                current_turn_rate = np.radians(turn_deg) * turn_sign
+
+        # ------------------------------------------------------------
+        # Apply maneuver if active
+        # ------------------------------------------------------------
+
+        if maneuver_steps_remaining > 0:
+            heading += current_turn_rate * dt
+            maneuver_steps_remaining -= 1
+
+        # ------------------------------------------------------------
+        # Bird-specific speed fluctuation (biological realism)
+        # ------------------------------------------------------------
+
+        if scene_type == "bird":
+            speed += np.random.normal(0, 2.0)
+            speed = max(speed, 5.0)  # prevent negative/near-zero speed
+
+        # ------------------------------------------------------------
+        # Recompute velocity from updated heading & speed
+        # ------------------------------------------------------------
+
+        vx = speed * np.cos(heading)
+        vy = speed * np.sin(heading)
+
+        # Small process noise (environmental disturbance)
+        vx += np.random.normal(0, config["process_noise"])
+        vy += np.random.normal(0, config["process_noise"])
+
+        # Position update
+        x += vx * dt
+        y += vy * dt
+
+        # Update truth state
         truth = GaussianState(
-            transition_model.function(
-                truth,
-                noise=True,
-                time_interval=timedelta(seconds=dt)
-            ),
+            StateVector([x, vx, y, vy]),
             truth.covar,
             timestamp=truth.timestamp + timedelta(seconds=dt)
         )
+
+
 
     # ============================================================
     # PLOTTING
