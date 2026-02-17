@@ -194,8 +194,21 @@ def simulate_scene(scene_type="aircraft",
                 guard = power_map[i-G:i+G+1,
                                   j-G:j+G+1]
 
+                training_cells = window.flatten()
+
+                #*** OS-CFAR Implementation !! *** 
+                # remove guard cells
+                guard_mask = np.zeros_like(window, dtype=bool)
+                guard_mask[G:-G or None, G:-G or None] = True
+                training_cells = training_cells[~guard_mask.flatten()]
+
+                sorted_cells = np.sort(training_cells)
+                noise_est = sorted_cells[int(0.75 * len(sorted_cells))]
                 training_sum = np.sum(window) - np.sum(guard)
                 noise_est = training_sum / N
+
+
+
                 threshold = alpha * noise_est
 
                 if cut_power > threshold:
