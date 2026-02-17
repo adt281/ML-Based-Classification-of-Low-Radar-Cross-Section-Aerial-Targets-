@@ -15,13 +15,18 @@ The system models radar propagation physics, RCS fluctuation, SNR-driven detecti
 
 Simulation → Tracking → Feature Extraction → Hierarchical ML Classification
 
-### 1. Radar Simulation
-- Constant velocity motion model
-- Cartesian → Polar measurement model
-- Swerling I RCS fluctuation
-- SNR-based detection probability
-- Clutter modeling
-- Missed detections (stealth behavior)
+1. Radar Simulation
+- Nearly constant velocity motion with stochastic maneuvers
+- Cartesian → Bearing–Range nonlinear measurement model
+- Swerling I RCS fluctuation (exponential target RCS)
+- Physics-based radar power ∝ RCS / R⁴
+- Range-dependent clutter density with gamma-distributed clutter RCS
+- 2D CA-CFAR detector with guard & training cells (controlled Pfa)
+- Clustered detection cleanup (local peak selection)
+- SNR-adaptive measurement noise
+- Velocity-gated detections (radial velocity consistency check)
+- Missed detections via CFAR thresholding + SNR filtering
+- Target-class-specific behavior (aircraft, stealth, bird)
 
 ### 2. Tracking Layer
 - Extended Kalman Filter (EKF)
