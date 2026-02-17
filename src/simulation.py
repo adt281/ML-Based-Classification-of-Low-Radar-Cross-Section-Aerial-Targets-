@@ -144,7 +144,7 @@ def simulate_scene(scene_type="aircraft",
         power_map[r_idx, b_idx] += target_power
 
         # ============================================================
-        # CLUTTER (reduced heavy-tail)
+        # CLUTTER
         # ============================================================
 
         clutter_rate = 2 + 10 * (R / max_range)**2
@@ -168,16 +168,16 @@ def simulate_scene(scene_type="aircraft",
             clutter_y_all.append(cr * np.sin(cb))
 
         # ============================================================
-        # 2D CA-CFAR with controlled Pfa
+        # 2D CA-CFAR
         # ============================================================
 
         T = RADAR_CONFIG["cfar_training"]
         G = RADAR_CONFIG["cfar_guard"]
         Pfa = RADAR_CONFIG["cfar_pfa"]
 
-        window_size = (2*(T+G)+1)**2
-        guard_size = (2*G+1)**2
-        N = window_size - guard_size
+        total_window = ((2*(T+G)+1)**2)
+        guard_window = (2*G+1)**2
+        N = total_window - guard_window
 
         alpha = N * (Pfa**(-1/N) - 1)
 
@@ -202,25 +202,16 @@ def simulate_scene(scene_type="aircraft",
                     detected_cells.append((i, j))
 
         # ============================================================
-        # CLUSTER CLEANUP
+        # LOCAL PEAK FILTER (stable clustering)
         # ============================================================
 
         filtered = []
-        used = set()
 
         for (i, j) in detected_cells:
-            if (i, j) in used:
-                continue
 
-            cluster = [(i, j)]
-
-            for (k, l) in detected_cells:
-                if abs(k - i) <= 1 and abs(l - j) <= 1:
-                    cluster.append((k, l))
-                    used.add((k, l))
-
-            best = max(cluster, key=lambda c: power_map[c])
-            filtered.append(best)
+            local = power_map[i-1:i+2, j-1:j+2]
+            if power_map[i, j] == np.max(local):
+                filtered.append((i, j))
 
         detected_cells = filtered
 
@@ -238,12 +229,14 @@ def simulate_scene(scene_type="aircraft",
             det_bearing = bearing_bins[j]
 
             snr_linear = power_map[i, j] / RADAR_CONFIG["noise_floor"]
+            snr_db = 10*np.log10(snr_linear + 1e-12)
 
-            if 10*np.log10(snr_linear + 1e-12) < 10:
+            if snr_db < 10:
                 continue
 
             dx = det_range * np.cos(det_bearing)
             dy = det_range * np.sin(det_bearing)
+
             vr_est = (dx*vx + dy*vy) / (det_range + 1e-6)
 
             if abs(vr_est - target_vr) > 50:
