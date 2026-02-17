@@ -53,14 +53,13 @@ RADAR_CONFIG = {
     "range_std_m": 20.0,
     "max_range": 15000,
 
-    # Grid resolution
     "num_range_bins": 200,
     "num_bearing_bins": 180,
 
-    # 2D CFAR
-    "cfar_training": 6,
-    "cfar_guard": 2,
-    "cfar_scale_factor": 4.0
+    # CFAR
+    "cfar_training": 8,
+    "cfar_guard": 3,
+    "cfar_pfa": 1e-4
 }
 
 
@@ -104,9 +103,7 @@ def simulate_scene(scene_type="aircraft",
     clutter_count_history = []
 
     maneuver_steps_remaining = 0
-    current_turn_rate = 0.0
 
-    # Precompute grid
     max_range = RADAR_CONFIG["max_range"]
     Nr = RADAR_CONFIG["num_range_bins"]
     Nb = RADAR_CONFIG["num_bearing_bins"]
@@ -120,20 +117,19 @@ def simulate_scene(scene_type="aircraft",
 
         x = truth.state_vector[0, 0]
         y = truth.state_vector[2, 0]
+        vx = truth.state_vector[1, 0]
+        vy = truth.state_vector[3, 0]
+
         R = np.sqrt(x**2 + y**2) + 1e-6
         B = np.arctan2(y, x)
 
         truth_x.append(x)
         truth_y.append(y)
 
-        # ============================================================
-        # 2D POWER MAP INITIALIZATION
-        # ============================================================
-
         power_map = np.ones((Nr, Nb)) * RADAR_CONFIG["noise_floor"]
 
         # ============================================================
-        # TARGET INJECTION
+        # TARGET
         # ============================================================
 
         rcs_fluct = np.random.exponential(scale=config["rcs"])
@@ -148,7 +144,7 @@ def simulate_scene(scene_type="aircraft",
         power_map[r_idx, b_idx] += target_power
 
         # ============================================================
-        # CLUTTER INJECTION
+        # CLUTTER (reduced heavy-tail)
         # ============================================================
 
         clutter_rate = 2 + 10 * (R / max_range)**2
@@ -156,10 +152,11 @@ def simulate_scene(scene_type="aircraft",
         clutter_count_history.append(clutter_count)
 
         for _ in range(clutter_count):
+
             cr = max_range * np.sqrt(np.random.rand())
             cb = np.random.uniform(-np.pi, np.pi)
 
-            clutter_rcs = np.random.gamma(shape=0.8, scale=0.5)
+            clutter_rcs = np.random.gamma(shape=2.0, scale=0.2)
             clutter_power = (RADAR_CONFIG["Pt"] * clutter_rcs) / (cr**4 + 1e-6)
 
             r_i = np.argmin(np.abs(range_bins - cr))
@@ -171,12 +168,18 @@ def simulate_scene(scene_type="aircraft",
             clutter_y_all.append(cr * np.sin(cb))
 
         # ============================================================
-        # TRUE 2D CA-CFAR
+        # 2D CA-CFAR with controlled Pfa
         # ============================================================
 
         T = RADAR_CONFIG["cfar_training"]
         G = RADAR_CONFIG["cfar_guard"]
-        alpha = RADAR_CONFIG["cfar_scale_factor"]
+        Pfa = RADAR_CONFIG["cfar_pfa"]
+
+        window_size = (2*(T+G)+1)**2
+        guard_size = (2*G+1)**2
+        N = window_size - guard_size
+
+        alpha = N * (Pfa**(-1/N) - 1)
 
         detected_cells = []
 
@@ -191,14 +194,35 @@ def simulate_scene(scene_type="aircraft",
                 guard = power_map[i-G:i+G+1,
                                   j-G:j+G+1]
 
-                training_cells = np.sum(window) - np.sum(guard)
-                num_training = window.size - guard.size
-
-                noise_est = training_cells / max(num_training, 1)
+                training_sum = np.sum(window) - np.sum(guard)
+                noise_est = training_sum / N
                 threshold = alpha * noise_est
 
                 if cut_power > threshold:
                     detected_cells.append((i, j))
+
+        # ============================================================
+        # CLUSTER CLEANUP
+        # ============================================================
+
+        filtered = []
+        used = set()
+
+        for (i, j) in detected_cells:
+            if (i, j) in used:
+                continue
+
+            cluster = [(i, j)]
+
+            for (k, l) in detected_cells:
+                if abs(k - i) <= 1 and abs(l - j) <= 1:
+                    cluster.append((k, l))
+                    used.add((k, l))
+
+            best = max(cluster, key=lambda c: power_map[c])
+            filtered.append(best)
+
+        detected_cells = filtered
 
         # ============================================================
         # MEASUREMENT GENERATION
@@ -206,12 +230,24 @@ def simulate_scene(scene_type="aircraft",
 
         step_detections = []
 
+        target_vr = (x*vx + y*vy) / (R + 1e-6)
+
         for i, j in detected_cells:
 
             det_range = range_bins[i]
             det_bearing = bearing_bins[j]
 
             snr_linear = power_map[i, j] / RADAR_CONFIG["noise_floor"]
+
+            if 10*np.log10(snr_linear + 1e-12) < 10:
+                continue
+
+            dx = det_range * np.cos(det_bearing)
+            dy = det_range * np.sin(det_bearing)
+            vr_est = (dx*vx + dy*vy) / (det_range + 1e-6)
+
+            if abs(vr_est - target_vr) > 50:
+                continue
 
             range_std = RADAR_CONFIG["range_std_m"] * \
                         np.sqrt(10 / max(snr_linear, 1e-6))
@@ -235,16 +271,11 @@ def simulate_scene(scene_type="aircraft",
         detections.append(step_detections if step_detections else None)
 
         # ============================================================
-        # MOTION PROPAGATION (UNCHANGED)
+        # MOTION PROPAGATION (unchanged)
         # ============================================================
-
-        # Extract fresh velocity from truth state
-        vx = truth.state_vector[1, 0]
-        vy = truth.state_vector[3, 0]
 
         speed = np.sqrt(vx**2 + vy**2)
         heading = np.arctan2(vy, vx)
-
 
         maneuver_cfg = MANEUVER_CONFIG[scene_type]
 
@@ -254,12 +285,6 @@ def simulate_scene(scene_type="aircraft",
                     maneuver_cfg["maneuver_duration_min"],
                     maneuver_cfg["maneuver_duration_max"]
                 )
-                turn_deg = np.random.uniform(
-                    maneuver_cfg["maneuver_min_deg"],
-                    maneuver_cfg["maneuver_max_deg"]
-                )
-                turn_sign = np.random.choice([-1, 1])
-                current_turn_rate = np.radians(turn_deg) * turn_sign
 
         if maneuver_steps_remaining > 0:
             heading += np.radians(np.random.uniform(-20, 20))
@@ -289,8 +314,6 @@ def simulate_scene(scene_type="aircraft",
     # ============================================================
 
     if plot:
-        
-        
 
         fig, axs = plt.subplots(2, 2, figsize=(14, 10))
         fig.suptitle(f"Radar Diagnostics - {scene_type}", fontsize=14)
