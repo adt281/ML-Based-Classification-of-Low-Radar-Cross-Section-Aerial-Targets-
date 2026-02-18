@@ -15,7 +15,7 @@ from stonesoup.types.detection import Detection
 TARGET_CONFIG = {
     "bird": {"speed": 50, "process_noise": 2.0, "rcs": 0.01},
     "aircraft": {"speed": 250.0, "process_noise": 0.1, "rcs": 5.0},
-    "stealth": {"speed": 250.0, "process_noise": 0.1, "rcs": 0.09},
+    "stealth": {"speed": 250.0, "process_noise": 0.1, "rcs": 0.01},
 }
 
 MANEUVER_CONFIG = {
@@ -267,12 +267,13 @@ def simulate_scene(scene_type="aircraft",
                     continue
 
                 # Ordered-statistic CFAR: pick k-th order statistic as noise estimate
-                k = int(0.75 * training_flat.size)  # 75th percentile cell
+                k = int(0.75 * training_flat.size)  # 70th percentile cell   [ keep 70- 75]
                 sorted_cells = np.sort(training_flat)
                 noise_est_os = sorted_cells[min(k, len(sorted_cells)-1)]
 
-                # Use existing alpha (note: alpha formula assumes CA-CFAR; OS-CFAR will require tuning)
-                threshold = alpha * noise_est_os
+                # OS-CFAR will require manual tuning !!!!!!!
+                alpha_os = 9  # start tuning manually
+                threshold = alpha_os * noise_est_os
 
                 if cut_power > threshold:
                     detected_cells.append((i, j))
@@ -424,4 +425,4 @@ def simulate_scene(scene_type="aircraft",
 if __name__ == "__main__":
     for target in ["aircraft", "stealth", "bird"]:
         print(f"\nRunning simulation for: {target}")
-        simulate_scene(scene_type=target, plot=True)
+        simulate_scene(scene_type="stealth", plot=True)
