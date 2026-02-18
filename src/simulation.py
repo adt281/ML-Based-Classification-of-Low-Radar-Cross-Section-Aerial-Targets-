@@ -15,7 +15,7 @@ from stonesoup.types.detection import Detection
 TARGET_CONFIG = {
     "bird": {"speed": 50, "process_noise": 2.0, "rcs": 0.01},
     "aircraft": {"speed": 250.0, "process_noise": 0.1, "rcs": 5.0},
-    "stealth": {"speed": 250.0, "process_noise": 0.1, "rcs": 0.5},
+    "stealth": {"speed": 250.0, "process_noise": 0.1, "rcs": 0.09},
 }
 
 MANEUVER_CONFIG = {
@@ -151,19 +151,71 @@ def simulate_scene(scene_type="aircraft",
         clutter_count = np.random.poisson(clutter_rate)
         clutter_count_history.append(clutter_count)
 
-        for _ in range(clutter_count):
+        # ============================================================
+        # CLUTTER - realistic patches + speckle
+        # ============================================================
 
+        # base speckle (exponential / Rayleigh-like) — stochastic noise floor
+        noise_map = np.random.exponential(scale=RADAR_CONFIG["noise_floor"], size=(Nr, Nb))
+        power_map += noise_map
+
+        # add a few patchy clutter regions (2D Gaussian blobs in range-bearing bins)
+        num_patches = np.random.randint(4, 10)  # how many clutter patches this scan
+        for _p in range(num_patches):
+            # center in physical coordinates
+            cr = max_range * np.sqrt(np.random.rand())         # range (area-consistent)
+            cb = np.random.vonmises(0, 0.0) if False else np.random.uniform(-np.pi, np.pi)
+            # amplitude: heavier tail but capped
+            amp = np.random.gamma(shape=1.5, scale=0.6)  # modifies local RCS of patch
+
+            # convert to bin centers
+            r_c = np.argmin(np.abs(range_bins - cr))
+            b_c = np.argmin(np.abs(bearing_bins - cb))
+
+            # patch widths in bins (scale with range for realism)
+            sigma_r = max(2, int(5 + (r_c / Nr) * 10))      # wider patches at larger ranges
+            sigma_b = max(1, int(2 + (b_c / Nb) * 4))
+
+            # create local 2D Gaussian bump and add it
+            r_indices = np.arange(max(0, r_c - 4*sigma_r), min(Nr, r_c + 4*sigma_r))
+            b_indices = np.arange(max(0, b_c - 4*sigma_b), min(Nb, b_c + 4*sigma_b))
+
+            rr, bb = np.meshgrid(r_indices, b_indices, indexing='ij')
+            dr = (rr - r_c) / max(1.0, sigma_r)
+            db = (bb - b_c) / max(1.0, sigma_b)
+            bump = amp * np.exp(-0.5 * (dr**2 + db**2))
+
+            # scale bump by inverse-range^4 effect at patch center (approx)
+            patch_range = range_bins[r_c] + 1e-6
+            bump *= (RADAR_CONFIG["Pt"] / (patch_range**4))
+
+            power_map[r_indices[:, None], b_indices[None, :]] += bump
+
+            # store some example clutter scatter points for plotting
+            # sample a few points from the bump to keep scatter realistic
+            flat_idx = np.argwhere(bump > 0)
+            if flat_idx.size:
+                samples = flat_idx[np.random.choice(flat_idx.shape[0],
+                                                    size=min(4, flat_idx.shape[0]),
+                                                    replace=False)]
+                for s in samples:
+                    rr_s = int(rr[s[0], s[1]])
+                    bb_s = int(bb[s[0], s[1]])
+                    cr_phys = range_bins[rr_s]
+                    cb_phys = bearing_bins[bb_s]
+                    clutter_x_all.append(cr_phys * np.cos(cb_phys))
+                    clutter_y_all.append(cr_phys * np.sin(cb_phys))
+
+        # Add a small number of independent point-clutter hits (like spiky birds)
+        point_clutter_count = np.random.poisson(3)
+        for _ in range(point_clutter_count):
             cr = max_range * np.sqrt(np.random.rand())
             cb = np.random.uniform(-np.pi, np.pi)
-
-            clutter_rcs = np.random.gamma(shape=2.0, scale=0.2)
+            clutter_rcs = np.random.gamma(shape=1.0, scale=0.4)
             clutter_power = (RADAR_CONFIG["Pt"] * clutter_rcs) / (cr**4 + 1e-6)
-
             r_i = np.argmin(np.abs(range_bins - cr))
             b_i = np.argmin(np.abs(bearing_bins - cb))
-
             power_map[r_i, b_i] += clutter_power
-
             clutter_x_all.append(cr * np.cos(cb))
             clutter_y_all.append(cr * np.sin(cb))
 
@@ -202,14 +254,25 @@ def simulate_scene(scene_type="aircraft",
                 guard_mask[G:-G or None, G:-G or None] = True
                 training_cells = training_cells[~guard_mask.flatten()]
 
-                sorted_cells = np.sort(training_cells)
-                noise_est = sorted_cells[int(0.75 * len(sorted_cells))]
-                training_sum = np.sum(window) - np.sum(guard)
-                noise_est = training_sum / N
+                # Flatten window and remove guard cells
+                window_flat = window.flatten()
+                # Build guard mask (same shape as window)
+                gmask = np.zeros_like(window, dtype=bool)
+                # mark guard cells True inside center (guard block)
+                gmask[G:-G or None, G:-G or None] = True
+                training_flat = window_flat[~gmask.flatten()]
 
+                # If too few training cells skip
+                if training_flat.size < max(3, int(0.5 * N)):
+                    continue
 
+                # Ordered-statistic CFAR: pick k-th order statistic as noise estimate
+                k = int(0.75 * training_flat.size)  # 75th percentile cell
+                sorted_cells = np.sort(training_flat)
+                noise_est_os = sorted_cells[min(k, len(sorted_cells)-1)]
 
-                threshold = alpha * noise_est
+                # Use existing alpha (note: alpha formula assumes CA-CFAR; OS-CFAR will require tuning)
+                threshold = alpha * noise_est_os
 
                 if cut_power > threshold:
                     detected_cells.append((i, j))
