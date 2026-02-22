@@ -285,7 +285,7 @@ def simulate_scene(scene_type="aircraft",
                 noise_est_os = sorted_cells[min(k, len(sorted_cells)-1)]
 
                 # OS-CFAR will require manual tuning !!!!!!!
-                alpha_os = 9  # start tuning manually
+                alpha_os = 5 # start tuning manually
                 threshold = alpha_os * noise_est_os
 
                 if cut_power > threshold:

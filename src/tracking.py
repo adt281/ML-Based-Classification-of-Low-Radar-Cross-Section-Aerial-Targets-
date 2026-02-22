@@ -92,7 +92,7 @@ class SingleTargetTracker:
 
             d2 = (innovation.T @ Sinv @ innovation).item()
 
-            gate_threshold = 9.21  # 99% chi-square, 2 DOF
+            gate_threshold = 5.99   # 95% chi-square, 2 DOF
 
             if d2 < gate_threshold:
                 gated.append(det)
@@ -109,9 +109,13 @@ class SingleTargetTracker:
         if not gated_detections:
             return None
 
-        idx = np.argmin(innovation_values)
-        return gated_detections[idx]
+        innovation_values = np.array(innovation_values)
 
+        # Convert Mahalanobis distance to likelihood
+        likelihoods = np.exp(-0.5 * innovation_values)
+
+        idx = np.argmax(likelihoods)
+        return gated_detections[idx]
     # --------------------------------------------------
     # Update
     # --------------------------------------------------
@@ -133,12 +137,6 @@ class SingleTargetTracker:
             np.sin(innovation[0, 0]),
             np.cos(innovation[0, 0])
         )
-
-        innovation[0, 0] = np.arctan2(
-            np.sin(innovation[0, 0]),
-            np.cos(innovation[0, 0])
-        )
-
         innovation_norm = np.linalg.norm(innovation).item()
 
         self.state = updated
@@ -202,7 +200,7 @@ class SingleTargetTracker:
 
                 initial_state = StateVector([x2, vx, y2, vy])
 
-                P = np.diag([100**2, 200**2, 100**2, 200**2])
+                P = np.diag([100**2, 100**2, 100**2, 100**2])
 
                 self.state = GaussianState(
                     initial_state,
@@ -224,8 +222,29 @@ class SingleTargetTracker:
 
         if gated:
             best = self.associate(gated, innovations)
-            innovation_norm = self.update(best)
-            miss_flag = 0
+
+            # --- Velocity consistency check ---
+            b, r = best.state_vector.flatten()
+            dx = r * np.cos(b)
+            dy = r * np.sin(b)
+
+            pred_x = self.state.state_vector[0, 0]
+            pred_y = self.state.state_vector[2, 0]
+            pred_vx = self.state.state_vector[1, 0]
+            pred_vy = self.state.state_vector[3, 0]
+
+            vx_meas = (dx - pred_x) / self.dt
+            vy_meas = (dy - pred_y) / self.dt
+
+            dv = np.sqrt((vx_meas - pred_vx)**2 + (vy_meas - pred_vy)**2)
+
+            if dv < 150:   # velocity change threshold
+                innovation_norm = self.update(best)
+                miss_flag = 0
+            else:
+                innovation_norm = 0.0
+                self.handle_miss()
+                miss_flag = 1
         else:
             innovation_norm = 0.0
             self.handle_miss()
@@ -268,88 +287,90 @@ class SingleTargetTracker:
 
 if __name__ == "__main__":
 
-    scene = simulate_scene(scene_type="stealth", plot=False)
+    for scene_type in ["stealth", "aircraft", "bird"]:
+        print(scene_type)
+        scene = simulate_scene(scene_type, plot=False)
 
-    tracker = SingleTargetTracker(
-        dt=scene["metadata"]["dt"],
-        measurement_model=scene["measurements"]["measurement_model"],
-        process_noise_scale=1.0
-    )
+        tracker = SingleTargetTracker(
+            dt=scene["metadata"]["dt"],
+            measurement_model=scene["measurements"]["measurement_model"],
+            process_noise_scale=5.0
+        )
 
-    for detections in scene["measurements"]["detections"]:
-        tracker.step(detections)
+        for detections in scene["measurements"]["detections"]:
+            tracker.step(detections)
 
-    results = tracker.get_results()
+        results = tracker.get_results()
 
-    # ======================================================
-    # PLOT 1 — Simulation Scene + EKF Track
-    # ======================================================
+        # ======================================================
+        # PLOT 1 — Simulation Scene + EKF Track
+        # ======================================================
 
-    plt.figure(figsize=(10, 8))
+        plt.figure(figsize=(10, 8))
 
-    plt.plot(scene["truth"]["x"],
-             scene["truth"]["y"],
-             linewidth=2,
-             label="Truth")
+        plt.plot(scene["truth"]["x"],
+                scene["truth"]["y"],
+                linewidth=2,
+                label="Truth")
 
-    plt.scatter(scene["plot_data"]["clutter_x"],
-                scene["plot_data"]["clutter_y"],
-                s=6,
-                alpha=0.15,
-                label="Clutter")
+        plt.scatter(scene["plot_data"]["clutter_x"],
+                    scene["plot_data"]["clutter_y"],
+                    s=6,
+                    alpha=0.15,
+                    label="Clutter")
 
-    plt.scatter(scene["plot_data"]["detect_x"],
-                scene["plot_data"]["detect_y"],
-                s=20,
-                marker='x',
-                label="All Detections")
+        plt.scatter(scene["plot_data"]["detect_x"],
+                    scene["plot_data"]["detect_y"],
+                    s=20,
+                    marker='x',
+                    label="All Detections")
 
-    est = results["estimates"]
+        est = results["estimates"]
 
-    if len(est) > 0:
-        plt.plot(est[:, 0],
-                 est[:, 2],
-                 linestyle='--',
-                 linewidth=2,
-                 label="EKF Track")
+        if len(est) > 0:
+            plt.plot(est[:, 0],
+                    est[:, 2],
+                    linestyle='--',
+                    linewidth=2,
+                    label="EKF Track")
 
-    plt.legend()
-    plt.title("Radar Scene with EKF Track")
-    plt.grid(True)
-    plt.show()
+        plt.legend()
+        plt.title("Radar Scene with EKF Track")
+        plt.grid(True)
+        plt.show()
 
-    # ======================================================
-    # PLOT 2 — Tracker Diagnostics
-    # ======================================================
+        # ======================================================
+        # PLOT 2 — Tracker Diagnostics
+        # ======================================================
 
-    t = np.arange(len(results["cov_trace"]))
+        t = np.arange(len(results["cov_trace"]))
 
-    fig, axs = plt.subplots(2, 3, figsize=(16, 9))
-    fig.suptitle("Tracker Diagnostics", fontsize=14)
+        fig, axs = plt.subplots(2, 3, figsize=(16, 9))
+        fig.suptitle("Tracker Diagnostics", fontsize=14)
 
-    axs[0, 0].plot(t, results["innovation_norm"])
-    axs[0, 0].set_title("Innovation Norm")
-    axs[0, 0].grid(True)
+        axs[0, 0].plot(t, results["innovation_norm"])
+        axs[0, 0].set_title("Innovation Norm")
+        axs[0, 0].grid(True)
 
-    axs[0, 1].plot(t, results["cov_trace"])
-    axs[0, 1].set_title("Covariance Trace")
-    axs[0, 1].grid(True)
+        axs[0, 1].plot(t, results["cov_trace"])
+        axs[0, 1].set_title("Covariance Trace")
+        axs[0, 1].grid(True)
 
-    axs[0, 2].plot(t, results["gated_count"])
-    axs[0, 2].set_title("Gated Detection Count")
-    axs[0, 2].grid(True)
+        axs[0, 2].plot(t, results["gated_count"])
+        axs[0, 2].set_title("Gated Detection Count")
+        axs[0, 2].grid(True)
 
-    axs[1, 0].plot(t, results["miss_flags"])
-    axs[1, 0].set_title("Miss Flags")
-    axs[1, 0].grid(True)
+        axs[1, 0].plot(t, results["miss_flags"])
+        axs[1, 0].set_title("Miss Flags")
+        axs[1, 0].grid(True)
 
-    axs[1, 1].plot(t, results["predicted_range"])
-    axs[1, 1].set_title("Predicted Range")
-    axs[1, 1].grid(True)
+        axs[1, 1].plot(t, results["predicted_range"])
+        axs[1, 1].set_title("Predicted Range")
+        axs[1, 1].grid(True)
 
-    axs[1, 2].plot(t, results["predicted_speed"])
-    axs[1, 2].set_title("Predicted Speed")
-    axs[1, 2].grid(True)
+        axs[1, 2].plot(t, results["predicted_speed"])
+        axs[1, 2].set_title("Predicted Speed")
+        axs[1, 2].grid(True)
 
-    plt.tight_layout()
-    plt.show()
+        plt.tight_layout()
+        plt.show()
