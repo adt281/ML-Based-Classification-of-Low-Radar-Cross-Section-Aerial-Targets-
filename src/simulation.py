@@ -12,6 +12,7 @@ from stonesoup.types.detection import Detection
 # Target Configuration
 # ============================================================
 
+
 TARGET_CONFIG = {
     "bird": {"speed": 50, "process_noise": 2.0, "rcs": 0.01},
     "aircraft": {"speed": 250.0, "process_noise": 0.1, "rcs": 5.0},
@@ -102,6 +103,14 @@ def simulate_scene(scene_type="aircraft",
     snr_history = []
     clutter_count_history = []
 
+
+    time_history = []
+    range_history = []
+    radial_velocity_history = []
+    detection_count_history = []
+    detection_presence_history = []
+
+
     maneuver_steps_remaining = 0
 
     max_range = RADAR_CONFIG["max_range"]
@@ -122,6 +131,10 @@ def simulate_scene(scene_type="aircraft",
 
         R = np.sqrt(x**2 + y**2) + 1e-6
         B = np.arctan2(y, x)
+
+        time_history.append(step * dt)
+        range_history.append(R)
+
 
         truth_x.append(x)
         truth_y.append(y)
@@ -300,6 +313,9 @@ def simulate_scene(scene_type="aircraft",
 
         target_vr = (x*vx + y*vy) / (R + 1e-6)
 
+        radial_velocity_history.append(target_vr)
+
+
         for i, j in detected_cells:
 
             det_range = range_bins[i]
@@ -338,7 +354,11 @@ def simulate_scene(scene_type="aircraft",
                 )
             )
 
-        detections.append(step_detections if step_detections else None)
+        detections.append(step_detections)
+        detection_count = len(step_detections)
+        detection_count_history.append(detection_count)
+        detection_presence_history.append(detection_count > 0)
+
 
         # ============================================================
         # MOTION PROPAGATION (unchanged)
@@ -379,50 +399,100 @@ def simulate_scene(scene_type="aircraft",
             timestamp=truth.timestamp + timedelta(seconds=dt)
         )
 
-    # ============================================================
-    # PLOTTING (UNCHANGED)
-    # ============================================================
+    
 
-    if plot:
+    
+    scene_data = {
+        "metadata": {
+            "scene_type": scene_type,
+            "num_steps": num_steps,
+            "dt": dt,
+            "target_config": TARGET_CONFIG[scene_type],
+            "radar_config": RADAR_CONFIG,
+            "maneuver_config": MANEUVER_CONFIG[scene_type]
+        },
 
-        fig, axs = plt.subplots(2, 2, figsize=(14, 10))
-        fig.suptitle(f"Radar Diagnostics - {scene_type}", fontsize=14)
+        "truth": {
+            "states": truth_states,
+            "x": np.array(truth_x),
+            "y": np.array(truth_y),
+            "range": np.array(range_history),
+            "radial_velocity": np.array(radial_velocity_history),
+            "time": np.array(time_history)
+        },
 
-        if scene_type == "bird":
-            margin = 5000
-            axs[0, 0].set_xlim(min(truth_x)-margin, max(truth_x)+margin)
-            axs[0, 0].set_ylim(min(truth_y)-margin, max(truth_y)+margin)
+        "radar_metrics": {
+            "snr_db": np.array(snr_history),
+            "clutter_count": np.array(clutter_count_history),
+            "detection_count": np.array(detection_count_history),
+            "detection_presence": np.array(detection_presence_history)
+        },
 
-        axs[0, 0].plot(truth_x, truth_y, linewidth=2, label="Truth")
-        axs[0, 0].scatter(clutter_x_all, clutter_y_all,
-                          s=6, alpha=0.15, label="Clutter")
-        axs[0, 0].scatter(detect_x_all, detect_y_all,
-                          s=20, marker='x', label="All Detections")
-        axs[0, 0].legend()
-        axs[0, 0].set_title("Full Scene (Anonymous Detections)")
+        "measurements": {
+            "detections": detections,
+            "measurement_model": measurement_model
+        },
 
-        axs[0, 1].plot(snr_history)
-        axs[0, 1].set_title("Target SNR (dB)")
+        "plot_data": {
+            "clutter_x": clutter_x_all,
+            "clutter_y": clutter_y_all,
+            "detect_x": detect_x_all,
+            "detect_y": detect_y_all
+        }
+    }
+    return scene_data
 
-        axs[1, 0].plot(clutter_count_history)
-        axs[1, 0].set_title("Clutter Count Per Scan")
 
-        heatmap, _, _ = np.histogram2d(clutter_x_all,
-                                       clutter_y_all,
-                                       bins=50)
-        axs[1, 1].imshow(heatmap.T, origin='lower')
-        axs[1, 1].set_title("Clutter Density Map")
 
-        for ax in axs.flat:
-            ax.grid(True)
 
-        plt.tight_layout()
-        plt.show()
+def plot_scene(scene_data):
+    truth_x = scene_data["truth"]["x"]
+    truth_y = scene_data["truth"]["y"]
+    clutter_x_all = scene_data["plot_data"]["clutter_x"]
+    clutter_y_all = scene_data["plot_data"]["clutter_y"]
+    detect_x_all = scene_data["plot_data"]["detect_x"]
+    detect_y_all = scene_data["plot_data"]["detect_y"]
+    snr_history = scene_data["radar_metrics"]["snr_db"]
+    clutter_count_history = scene_data["radar_metrics"]["clutter_count"]
+    scene_type = scene_data["metadata"]["scene_type"]
 
-    return truth_states, detections, None, measurement_model, {}
+    fig, axs = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle(f"Radar Diagnostics - {scene_type}", fontsize=14)
+
+    if scene_type == "bird":
+        margin = 5000
+        axs[0, 0].set_xlim(min(truth_x)-margin, max(truth_x)+margin)
+        axs[0, 0].set_ylim(min(truth_y)-margin, max(truth_y)+margin)
+
+    axs[0, 0].plot(truth_x, truth_y, linewidth=2, label="Truth")
+    axs[0, 0].scatter(clutter_x_all, clutter_y_all,
+                      s=6, alpha=0.15, label="Clutter")
+    axs[0, 0].scatter(detect_x_all, detect_y_all,
+                      s=20, marker='x', label="All Detections")
+    axs[0, 0].legend()
+    axs[0, 0].set_title("Full Scene (Anonymous Detections)")
+
+    axs[0, 1].plot(snr_history)
+    axs[0, 1].set_title("Target SNR (dB)")
+
+    axs[1, 0].plot(clutter_count_history)
+    axs[1, 0].set_title("Clutter Count Per Scan")
+
+    heatmap, _, _ = np.histogram2d(clutter_x_all,
+                                   clutter_y_all,
+                                   bins=50)
+    axs[1, 1].imshow(heatmap.T, origin='lower')
+    axs[1, 1].set_title("Clutter Density Map")
+
+    for ax in axs.flat:
+        ax.grid(True)
+
+    plt.tight_layout()
+    plt.show()
 
 
 if __name__ == "__main__":
-    for target in ["aircraft", "stealth", "bird"]:
-        print(f"\nRunning simulation for: {target}")
-        simulate_scene(scene_type="stealth", plot=True)
+    scene_data = simulate_scene(scene_type="stealth", plot=False)
+
+    #plotting
+    plot_scene(scene_data)
