@@ -13,9 +13,10 @@ from stonesoup.models.transition.linear import (
 from stonesoup.types.hypothesis import SingleHypothesis
 
 from simulation import simulate_scene
+from stonesoup.models.transition.linear import ConstantAcceleration
 
 
-class SingleTargetTracker:
+class CVTracker:
 
     def __init__(self, dt, measurement_model, process_noise_scale=1.0):
 
@@ -92,7 +93,7 @@ class SingleTargetTracker:
 
             d2 = (innovation.T @ Sinv @ innovation).item()
 
-            gate_threshold = 5.99   # 95% chi-square, 2 DOF
+            gate_threshold = 9.21   # 99%
 
             if d2 < gate_threshold:
                 gated.append(det)
@@ -112,9 +113,7 @@ class SingleTargetTracker:
         innovation_values = np.array(innovation_values)
 
         # Convert Mahalanobis distance to likelihood
-        likelihoods = np.exp(-0.5 * innovation_values)
-
-        idx = np.argmax(likelihoods)
+        idx = np.argmin(innovation_values)
         return gated_detections[idx]
     # --------------------------------------------------
     # Update
@@ -124,6 +123,18 @@ class SingleTargetTracker:
 
         measurement_prediction = self.updater.predict_measurement(self.state)
 
+        innovation = detection.state_vector - measurement_prediction.state_vector
+
+        innovation[0, 0] = np.arctan2(
+            np.sin(innovation[0, 0]),
+            np.cos(innovation[0, 0])
+        )
+
+        S = measurement_prediction.covar
+        Sinv = np.linalg.inv(S)
+
+        d2 = (innovation.T @ Sinv @ innovation).item()
+
         hypothesis = SingleHypothesis(
             self.state,
             detection,
@@ -131,13 +142,6 @@ class SingleTargetTracker:
         )
 
         updated = self.updater.update(hypothesis)
-
-        innovation = detection.state_vector - measurement_prediction.state_vector
-        innovation[0, 0] = np.arctan2(
-            np.sin(innovation[0, 0]),
-            np.cos(innovation[0, 0])
-        )
-        innovation_norm = np.linalg.norm(innovation).item()
 
         self.state = updated
 
@@ -147,8 +151,7 @@ class SingleTargetTracker:
         if self.status == "tentative" and self.hit_count >= 3:
             self.status = "confirmed"
 
-        return innovation_norm
-
+        return d2
     # --------------------------------------------------
     # Miss Handling
     # --------------------------------------------------
@@ -200,7 +203,7 @@ class SingleTargetTracker:
 
                 initial_state = StateVector([x2, vx, y2, vy])
 
-                P = np.diag([100**2, 100**2, 100**2, 100**2])
+                P = np.diag([200**2, 50**2, 200**2, 50**2])
 
                 self.state = GaussianState(
                     initial_state,
@@ -238,7 +241,8 @@ class SingleTargetTracker:
 
             dv = np.sqrt((vx_meas - pred_vx)**2 + (vy_meas - pred_vy)**2)
 
-            if dv < 150:   # velocity change threshold
+            if gated:
+                best = self.associate(gated, innovations)
                 innovation_norm = self.update(best)
                 miss_flag = 0
             else:
@@ -280,10 +284,266 @@ class SingleTargetTracker:
             "predicted_speed": np.array(self.predicted_speed_history)
         }
 
+class CATracker:
 
-# ============================================================
-# Standalone Execution
-# ============================================================
+    def __init__(self, dt, measurement_model, process_noise_scale=1):
+
+        self.dt = dt
+        self.measurement_model = measurement_model
+
+        # 6D CA transition model
+        self.transition_model = CombinedLinearGaussianTransitionModel([
+            ConstantAcceleration(process_noise_scale),
+            ConstantAcceleration(process_noise_scale)
+        ])
+
+        self.predictor = ExtendedKalmanPredictor(self.transition_model)
+        self.updater = ExtendedKalmanUpdater(measurement_model)
+
+        self.state = None
+        self.initialized = False
+        self.status = "tentative"
+
+        self.consecutive_misses = 0
+        self.hit_count = 0
+        self.init_buffer = []
+
+        # Logging (same structure as CV)
+        self.estimate_history = []
+        self.cov_trace_history = []
+        self.innovation_history = []
+        self.gated_count_history = []
+        self.miss_flag_history = []
+        self.status_history = []
+        self.predicted_range_history = []
+        self.predicted_speed_history = []
+
+    # --------------------------------------------------
+    # Prediction
+    # --------------------------------------------------
+
+    def predict(self):
+
+        new_timestamp = self.state.timestamp + timedelta(seconds=self.dt)
+
+        self.state = self.predictor.predict(
+            self.state,
+            timestamp=new_timestamp
+        )
+
+    # --------------------------------------------------
+    # Gating
+    # --------------------------------------------------
+
+    def gate(self, detections):
+
+        if not detections:
+            return [], []
+
+        gated = []
+        innovations = []
+
+        measurement_prediction = self.updater.predict_measurement(self.state)
+        S = measurement_prediction.covar
+        Sinv = np.linalg.inv(S)
+
+        for det in detections:
+
+            innovation = det.state_vector - measurement_prediction.state_vector
+
+            # Normalize bearing innovation
+            innovation[0, 0] = np.arctan2(
+                np.sin(innovation[0, 0]),
+                np.cos(innovation[0, 0])
+            )
+
+            d2 = (innovation.T @ Sinv @ innovation).item()
+
+            gate_threshold = 9.21   # 99% chi-square (2 DOF) 
+
+            if d2 < gate_threshold:
+                gated.append(det)
+                innovations.append(d2)
+
+        return gated, innovations
+
+    # --------------------------------------------------
+    # Association
+    # --------------------------------------------------
+
+    def associate(self, gated_detections, innovation_values):
+
+        if not gated_detections:
+            return None
+
+        innovation_values = np.array(innovation_values)
+
+        idx = np.argmin(innovation_values)
+
+        return gated_detections[idx]
+
+    # --------------------------------------------------
+    # Update
+    # --------------------------------------------------
+
+    def update(self, detection):
+        measurement_prediction = self.updater.predict_measurement(self.state)
+
+        innovation = detection.state_vector - measurement_prediction.state_vector
+
+        innovation[0, 0] = np.arctan2(
+            np.sin(innovation[0, 0]),
+            np.cos(innovation[0, 0])
+        )
+
+        S = measurement_prediction.covar
+        Sinv = np.linalg.inv(S)
+
+        d2 = (innovation.T @ Sinv @ innovation).item()
+
+        hypothesis = SingleHypothesis(
+            self.state,
+            detection,
+            measurement_prediction
+        )
+
+        updated = self.updater.update(hypothesis)
+
+        self.state = updated
+
+        self.consecutive_misses = 0
+        self.hit_count += 1
+
+        if self.status == "tentative" and self.hit_count >= 3:
+            self.status = "confirmed"
+
+        return d2
+
+    # --------------------------------------------------
+    # Miss Handling
+    # --------------------------------------------------
+
+    def handle_miss(self):
+
+        self.consecutive_misses += 1
+
+        if self.consecutive_misses > 12:
+            self.status = "deleted"
+
+    # --------------------------------------------------
+    # Initialization
+    # --------------------------------------------------
+
+    def initialize_from_detections(self):
+
+        d1 = self.init_buffer[-2]
+        d2 = self.init_buffer[-1]
+
+        b1, r1 = d1.state_vector.flatten()
+        b2, r2 = d2.state_vector.flatten()
+
+        x1 = r1 * np.cos(b1)
+        y1 = r1 * np.sin(b1)
+
+        x2 = r2 * np.cos(b2)
+        y2 = r2 * np.sin(b2)
+
+        vx = (x2 - x1) / self.dt
+        vy = (y2 - y1) / self.dt
+
+        speed = np.sqrt(vx**2 + vy**2)
+
+        if speed > 400:
+            self.init_buffer.pop(0)
+            return False
+
+        # 6D state
+        initial_state = StateVector([x2, vx, 0.0,
+                                     y2, vy, 0.0])
+
+        P = np.diag([
+            200**2, 50**2, 20**2,
+            200**2, 50**2, 20**2
+        ])
+
+        self.state = GaussianState(
+            initial_state,
+            P,
+            timestamp=d2.timestamp
+        )
+
+        self.initialized = True
+        self.hit_count = 2
+
+        return True
+
+    # --------------------------------------------------
+    # Step
+    # --------------------------------------------------
+
+    def step(self, detections):
+
+        if self.status == "deleted":
+            return
+
+        if not self.initialized:
+
+            if detections:
+                # pick closest to origin (or smallest range)
+                best = min(detections, key=lambda d: d.state_vector[1,0])
+                self.init_buffer.append(best)
+
+            if len(self.init_buffer) >= 2:
+                success = self.initialize_from_detections()
+                if not success:
+                    return
+
+            return
+
+        self.predict()
+
+        gated, innovations = self.gate(detections)
+
+        if gated:
+            best = self.associate(gated, innovations)
+            innovation_norm = self.update(best)
+            miss_flag = 0
+        else:
+            innovation_norm = 0.0
+            self.handle_miss()
+            miss_flag = 1
+        x = self.state.state_vector.flatten()
+
+        speed = np.sqrt(x[1]**2 + x[4]**2)
+        rng = np.sqrt(x[0]**2 + x[3]**2)
+
+        self.estimate_history.append(x.copy())
+        self.cov_trace_history.append(np.trace(self.state.covar))
+        self.innovation_history.append(innovation_norm)
+        self.gated_count_history.append(len(gated))
+        self.miss_flag_history.append(miss_flag)
+        self.status_history.append(self.status)
+        self.predicted_range_history.append(rng)
+        self.predicted_speed_history.append(speed)
+
+    # --------------------------------------------------
+    # Results
+    # --------------------------------------------------
+
+    def get_results(self):
+
+        return {
+            "estimates": np.array(self.estimate_history),
+            "cov_trace": np.array(self.cov_trace_history),
+            "innovation_norm": np.array(self.innovation_history),
+            "gated_count": np.array(self.gated_count_history),
+            "miss_flags": np.array(self.miss_flag_history),
+            "status_history": self.status_history,
+            "predicted_range": np.array(self.predicted_range_history),
+            "predicted_speed": np.array(self.predicted_speed_history)
+        }
+
+
 
 if __name__ == "__main__":
 
@@ -291,11 +551,17 @@ if __name__ == "__main__":
         print(scene_type)
         scene = simulate_scene(scene_type, plot=False)
 
-        tracker = SingleTargetTracker(
+        tracker = CATracker(
+            dt=scene["metadata"]["dt"],
+            measurement_model=scene["measurements"]["measurement_model"],
+            process_noise_scale=20
+        )
+        '''
+        tracker = CVTracker(
             dt=scene["metadata"]["dt"],
             measurement_model=scene["measurements"]["measurement_model"],
             process_noise_scale=5.0
-        )
+        )'''
 
         for detections in scene["measurements"]["detections"]:
             tracker.step(detections)
@@ -329,7 +595,7 @@ if __name__ == "__main__":
 
         if len(est) > 0:
             plt.plot(est[:, 0],
-                    est[:, 2],
+                    est[:, 3],
                     linestyle='--',
                     linewidth=2,
                     label="EKF Track")
