@@ -19,6 +19,7 @@ from stonesoup.models.transition.nonlinear import ConstantTurn
 class CVTracker:
 
     def __init__(self, dt, measurement_model, process_noise_scale=5.0):
+        
 
         self.dt = dt
         self.measurement_model = measurement_model
@@ -34,6 +35,9 @@ class CVTracker:
         self.base_bearing_std = np.radians(1.6)
         self.base_range_std = 20.0
         self.snr_ref = 10.0  # reference SNR scaling constant
+
+        self.prob_detection = 0.85     # Pd
+        self.clutter_density = 1e-5    # lambda_c (per unit area)
 
         self.state = None
         self.initialized = False
@@ -116,47 +120,93 @@ class CVTracker:
         return gated, innovations
 
     # ---------------- Update ----------------
-    def update(self, detection):
+    def update(self, gated_detections):
 
-        snr_linear = detection.metadata.get("snr_linear", 10.0)
-        snr_linear = np.clip(snr_linear, 0.1, 1e4)
+        if not gated_detections:
+            self.handle_miss()
+            return 100.0
 
-        scale = np.sqrt(self.snr_ref / snr_linear)
+        PD = self.prob_detection
+        lambda_c = self.clutter_density
+        gamma = 9.21  # gate threshold (2 DOF)
 
-        range_std = self.base_range_std * scale
-        bearing_std = self.base_bearing_std * scale
+        meas_predictions = []
+        innovations = []
+        likelihoods = []
 
-        R_dynamic = np.diag([bearing_std**2, range_std**2])
+        # --- Compute innovations and likelihoods ---
+        for det in gated_detections:
 
-        dynamic_measurement_model = type(self.measurement_model)(
-            ndim_state=self.measurement_model.ndim_state,
-            mapping=self.measurement_model.mapping,
-            noise_covar=R_dynamic
+            meas_pred = self.updater.predict_measurement(self.state)
+
+            innovation = det.state_vector - meas_pred.state_vector
+            innovation[0, 0] = np.arctan2(
+                np.sin(innovation[0, 0]),
+                np.cos(innovation[0, 0])
+            )
+
+            S = meas_pred.covar
+            Sinv = np.linalg.inv(S)
+            d2 = (innovation.T @ Sinv @ innovation).item()
+
+            m = len(innovation)
+
+            # Full Gaussian likelihood
+            L = (
+                1.0 /
+                np.sqrt((2 * np.pi) ** m * np.linalg.det(S))
+            ) * np.exp(-0.5 * d2)
+
+            meas_predictions.append((meas_pred, innovation, S))
+            likelihoods.append(L)
+
+        likelihoods = np.array(likelihoods)
+
+        # --- Gate volume ---
+        S_gate = meas_predictions[0][2]
+        V = np.pi * gamma * np.sqrt(np.linalg.det(S_gate))
+
+        # --- Association probabilities ---
+        numerator = PD * likelihoods
+        denominator = np.sum(numerator) + (1 - PD) * lambda_c * V
+
+        betas = numerator / denominator
+        beta_0 = (1 - PD) * lambda_c * V / denominator
+
+        # --- Compute Kalman gain once ---
+        meas_pred, _, S = meas_predictions[0]
+        H = self.measurement_model.jacobian(self.state)
+        K = self.state.covar @ H.T @ np.linalg.inv(S)
+
+        # --- Combined innovation ---
+        innovation_bar = sum(
+            betas[i] * meas_predictions[i][1]
+            for i in range(len(meas_predictions))
         )
 
-        # Attach dynamic model ONLY here
-        detection.measurement_model = dynamic_measurement_model
+        # --- State update ---
+        x_new = self.state.state_vector + K @ innovation_bar
 
-        measurement_prediction = self.updater.predict_measurement(self.state)
+        # --- Covariance update ---
+        P = self.state.covar
+        I = np.eye(P.shape[0])
 
-        innovation = detection.state_vector - measurement_prediction.state_vector
-
-        innovation[0, 0] = np.arctan2(
-            np.sin(innovation[0, 0]),
-            np.cos(innovation[0, 0])
+        P_new = (
+            beta_0 * P +
+            (1 - beta_0) * (I - K @ H) @ P
         )
 
-        S = measurement_prediction.covar
-        Sinv = np.linalg.inv(S)
-        d2 = (innovation.T @ Sinv @ innovation).item()
+        # Add spread term
+        spread = np.zeros_like(P)
+        for i in range(len(meas_predictions)):
+            nu = meas_predictions[i][1]
+            diff = nu - innovation_bar
+            spread += betas[i] * (K @ diff @ diff.T @ K.T)
 
-        hypothesis = SingleHypothesis(
-            self.state,
-            detection,
-            measurement_prediction
-        )
+        P_new += spread
 
-        self.state = self.updater.update(hypothesis)
+        self.state.state_vector = x_new
+        self.state.covar = P_new
 
         self.consecutive_misses = 0
         self.hit_count += 1
@@ -164,7 +214,7 @@ class CVTracker:
         if self.status == "tentative" and self.hit_count >= 3:
             self.status = "confirmed"
 
-        return d2
+        return -2 * np.log(np.sum(likelihoods) + 1e-12)
 
     # ---------------- Miss Handling ----------------
 
@@ -264,9 +314,9 @@ class CTTracker:
         self.measurement_model = measurement_model
 
         # STRONGER maneuver capability
-        self.transition_model = ConstantTurn(
-            linear_noise_coeffs=[1, 1],   # allow velocity diffusion
-            turn_noise_coeff=0.1             # allow omega to move
+        self.transition_model =ConstantTurn(
+            linear_noise_coeffs=[0.3, 0.3],
+            turn_noise_coeff=0.02
         )
 
         self.predictor = ExtendedKalmanPredictor(self.transition_model)
@@ -348,47 +398,94 @@ class CTTracker:
                 innovations.append(d2)
 
         return gated, innovations
-    # ---------------- Update ----------------
-    def update(self, detection):
+    
+    # ---------------- Update (IMM-PDAF, validated gate volume) ----------------
+    def update(self, gated_detections):
 
-        snr_linear = detection.metadata.get("snr_linear", 10.0)
-        snr_linear = np.clip(snr_linear, 0.1, 1e4)
+        if not gated_detections:
+            self.handle_miss()
+            return 100.0
 
-        scale = np.sqrt(self.snr_ref / snr_linear)
+        PD = 0.9
+        lambda_c = 1e-5
+        gamma = 11.83   # CT uses relaxed 99.7% gate (2 DOF)
 
-        range_std = self.base_range_std * scale
-        bearing_std = self.base_bearing_std * scale
+        meas_predictions = []
+        innovations = []
+        likelihoods = []
 
-        R_dynamic = np.diag([bearing_std**2, range_std**2])
+        # --- Compute innovations and likelihoods ---
+        for det in gated_detections:
 
-        dynamic_measurement_model = type(self.measurement_model)(
-            ndim_state=self.measurement_model.ndim_state,
-            mapping=self.measurement_model.mapping,
-            noise_covar=R_dynamic
+            meas_pred = self.updater.predict_measurement(self.state)
+
+            innovation = det.state_vector - meas_pred.state_vector
+            innovation[0, 0] = np.arctan2(
+                np.sin(innovation[0, 0]),
+                np.cos(innovation[0, 0])
+            )
+
+            S = meas_pred.covar
+            Sinv = np.linalg.inv(S)
+            d2 = (innovation.T @ Sinv @ innovation).item()
+
+            m = len(innovation)
+
+            L = (
+                1.0 /
+                np.sqrt((2 * np.pi) ** m * np.linalg.det(S))
+            ) * np.exp(-0.5 * d2)
+
+            meas_predictions.append((meas_pred, innovation, S))
+            likelihoods.append(L)
+
+        likelihoods = np.array(likelihoods)
+
+        # --- Gate volume ---
+        S_gate = meas_predictions[0][2]
+        V = np.pi * gamma * np.sqrt(np.linalg.det(S_gate))
+
+        # --- Association probabilities ---
+        numerator = PD * likelihoods
+        denominator = np.sum(numerator) + (1 - PD) * lambda_c * V
+
+        betas = numerator / denominator
+        beta_0 = (1 - PD) * lambda_c * V / denominator
+
+        # --- EKF Gain ---
+        meas_pred, _, S = meas_predictions[0]
+        H = self.measurement_model.jacobian(self.state)
+        K = self.state.covar @ H.T @ np.linalg.inv(S)
+
+        # --- Combined innovation ---
+        innovation_bar = sum(
+            betas[i] * meas_predictions[i][1]
+            for i in range(len(meas_predictions))
         )
 
-        detection.measurement_model = dynamic_measurement_model
+        # --- State update ---
+        x_new = self.state.state_vector + K @ innovation_bar
 
-        measurement_prediction = self.updater.predict_measurement(self.state)
+        # --- Covariance update ---
+        P = self.state.covar
+        I = np.eye(P.shape[0])
 
-        innovation = detection.state_vector - measurement_prediction.state_vector
-
-        innovation[0, 0] = np.arctan2(
-            np.sin(innovation[0, 0]),
-            np.cos(innovation[0, 0])
+        P_new = (
+            beta_0 * P +
+            (1 - beta_0) * (I - K @ H) @ P
         )
 
-        S = measurement_prediction.covar
-        Sinv = np.linalg.inv(S)
-        d2 = (innovation.T @ Sinv @ innovation).item()
+        # Spread term
+        spread = np.zeros_like(P)
+        for i in range(len(meas_predictions)):
+            nu = meas_predictions[i][1]
+            diff = nu - innovation_bar
+            spread += betas[i] * (K @ diff @ diff.T @ K.T)
 
-        hypothesis = SingleHypothesis(
-            self.state,
-            detection,
-            measurement_prediction
-        )
+        P_new += spread
 
-        self.state = self.updater.update(hypothesis)
+        self.state.state_vector = x_new
+        self.state.covar = P_new
 
         self.consecutive_misses = 0
         self.hit_count += 1
@@ -396,13 +493,7 @@ class CTTracker:
         if self.status == "tentative" and self.hit_count >= 3:
             self.status = "confirmed"
 
-        return d2
-    # ---------------- Miss Handling ----------------
-
-    def handle_miss(self):
-        self.consecutive_misses += 1
-        if self.consecutive_misses > 8:
-            self.status = "deleted"
+        return -2 * np.log(np.sum(likelihoods) + 1e-12)
 
     # ---------------- Initialization ----------------
 
@@ -451,6 +542,11 @@ class CTTracker:
 
         return True
 
+
+    def handle_miss(self):
+        self.consecutive_misses += 1
+        if self.consecutive_misses > 8:
+            self.status = "deleted"
     # ---------------- Step ----------------
 
     def step(self, detections):
@@ -580,12 +676,11 @@ class IMMTracker:
 
         mu_prior = self.PI.T @ self.mu
         log_mu_prior = np.log(mu_prior + 1e-12)
-
+       
         log_likelihoods = np.array([
-            -0.5 * d2_cv,
-            -0.5 * d2_ct
+            d2_cv,
+            d2_ct
         ])
-
         log_mu_post = log_mu_prior + log_likelihoods
         log_mu_post -= logsumexp(log_mu_post)
 
@@ -657,8 +752,7 @@ if __name__ == "__main__":
             gated_cv, innov_cv = cv.gate(detections)
 
             if len(gated_cv) > 0:
-                best_cv = cv.associate(gated_cv, innov_cv)
-                d2_cv = cv.update(best_cv)
+                d2_cv = cv.update(gated_cv)
             else:
                 cv.handle_miss()
                 d2_cv = 100.0   # large penalty
@@ -669,8 +763,7 @@ if __name__ == "__main__":
             gated_ct, innov_ct = ct.gate(detections)
 
             if len(gated_ct) > 0:
-                best_ct = ct.associate(gated_ct, innov_ct)
-                d2_ct = ct.update(best_ct)
+                d2_ct = ct.update(gated_ct)
             else:
                 ct.handle_miss()
                 d2_ct = 100.0   # large penalty
