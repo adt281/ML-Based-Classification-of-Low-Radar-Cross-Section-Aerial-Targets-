@@ -31,6 +31,10 @@ class CVTracker:
         self.predictor = ExtendedKalmanPredictor(self.transition_model)
         self.updater = ExtendedKalmanUpdater(measurement_model)
 
+        self.base_bearing_std = np.radians(1.6)
+        self.base_range_std = 20.0
+        self.snr_ref = 10.0  # reference SNR scaling constant
+
         self.state = None
         self.initialized = False
         self.status = "tentative"
@@ -59,7 +63,6 @@ class CVTracker:
         )
 
     # ---------------- Gating ----------------
-
     def gate(self, detections):
 
         if not detections:
@@ -68,11 +71,31 @@ class CVTracker:
         gated = []
         innovations = []
 
-        measurement_prediction = self.updater.predict_measurement(self.state)
-        S = measurement_prediction.covar
-        Sinv = np.linalg.inv(S)
-
         for det in detections:
+
+            snr_linear = det.metadata.get("snr_linear", 10.0)
+
+            # Clamp SNR to avoid numerical explosion
+            snr_linear = np.clip(snr_linear, 0.1, 1e4)
+
+            scale = np.sqrt(self.snr_ref / snr_linear)
+
+            range_std = self.base_range_std * scale
+            bearing_std = self.base_bearing_std * scale
+
+            R_dynamic = np.diag([bearing_std**2, range_std**2])
+
+            dynamic_measurement_model = type(self.measurement_model)(
+                ndim_state=self.measurement_model.ndim_state,
+                mapping=self.measurement_model.mapping,
+                noise_covar=R_dynamic
+            )
+
+            # IMPORTANT: do NOT modify detection object here
+            measurement_prediction = self.updater.predict_measurement(
+                self.state,
+                measurement_model=dynamic_measurement_model
+            )
 
             innovation = det.state_vector - measurement_prediction.state_vector
 
@@ -81,29 +104,38 @@ class CVTracker:
                 np.cos(innovation[0, 0])
             )
 
+            S = measurement_prediction.covar
+            Sinv = np.linalg.inv(S)
+
             d2 = (innovation.T @ Sinv @ innovation).item()
 
-            gate_threshold = 9.21  # 99% chi-square, 2 DOF
-
-            if d2 < gate_threshold:
+            if d2 < 9.21:
                 gated.append(det)
                 innovations.append(d2)
 
         return gated, innovations
 
-    # ---------------- Association ----------------
-
-    def associate(self, gated_detections, innovation_values):
-
-        if not gated_detections:
-            return None
-
-        idx = np.argmin(np.array(innovation_values))
-        return gated_detections[idx]
-
     # ---------------- Update ----------------
-
     def update(self, detection):
+
+        snr_linear = detection.metadata.get("snr_linear", 10.0)
+        snr_linear = np.clip(snr_linear, 0.1, 1e4)
+
+        scale = np.sqrt(self.snr_ref / snr_linear)
+
+        range_std = self.base_range_std * scale
+        bearing_std = self.base_bearing_std * scale
+
+        R_dynamic = np.diag([bearing_std**2, range_std**2])
+
+        dynamic_measurement_model = type(self.measurement_model)(
+            ndim_state=self.measurement_model.ndim_state,
+            mapping=self.measurement_model.mapping,
+            noise_covar=R_dynamic
+        )
+
+        # Attach dynamic model ONLY here
+        detection.measurement_model = dynamic_measurement_model
 
         measurement_prediction = self.updater.predict_measurement(self.state)
 
@@ -216,6 +248,14 @@ class CVTracker:
         self.predicted_range_history.append(rng)
         self.predicted_speed_history.append(speed)
 
+    def associate(self, gated_detections, innovation_values):
+
+        if not gated_detections:
+            return None
+
+        idx = np.argmin(np.array(innovation_values))
+        return gated_detections[idx]
+
 class CTTracker:
 
     def __init__(self, dt, measurement_model):
@@ -231,6 +271,10 @@ class CTTracker:
 
         self.predictor = ExtendedKalmanPredictor(self.transition_model)
         self.updater = ExtendedKalmanUpdater(measurement_model)
+
+        self.base_bearing_std = np.radians(1.6)
+        self.base_range_std = 20.0
+        self.snr_ref = 10.0  # reference SNR scaling constant
 
         self.state = None
         self.initialized = False
@@ -256,7 +300,6 @@ class CTTracker:
         self.state = self.predictor.predict(self.state, timestamp=new_timestamp)
 
     # ---------------- Gating ----------------
-
     def gate(self, detections):
 
         if not detections:
@@ -265,11 +308,28 @@ class CTTracker:
         gated = []
         innovations = []
 
-        measurement_prediction = self.updater.predict_measurement(self.state)
-        S = measurement_prediction.covar
-        Sinv = np.linalg.inv(S)
-
         for det in detections:
+
+            snr_linear = det.metadata.get("snr_linear", 10.0)
+            snr_linear = np.clip(snr_linear, 0.1, 1e4)
+
+            scale = np.sqrt(self.snr_ref / snr_linear)
+
+            range_std = self.base_range_std * scale
+            bearing_std = self.base_bearing_std * scale
+
+            R_dynamic = np.diag([bearing_std**2, range_std**2])
+
+            dynamic_measurement_model = type(self.measurement_model)(
+                ndim_state=self.measurement_model.ndim_state,
+                mapping=self.measurement_model.mapping,
+                noise_covar=R_dynamic
+            )
+
+            measurement_prediction = self.updater.predict_measurement(
+                self.state,
+                measurement_model=dynamic_measurement_model
+            )
 
             innovation = det.state_vector - measurement_prediction.state_vector
 
@@ -278,32 +338,41 @@ class CTTracker:
                 np.cos(innovation[0, 0])
             )
 
+            S = measurement_prediction.covar
+            Sinv = np.linalg.inv(S)
+
             d2 = (innovation.T @ Sinv @ innovation).item()
 
-            # Slightly relaxed gate for maneuver model
-            if d2 < 11.83:   # 99.7%
+            if d2 < 11.83:  # relaxed gate for CT
                 gated.append(det)
                 innovations.append(d2)
 
         return gated, innovations
-
-    # ---------------- Association ----------------
-
-    def associate(self, gated_detections, innovation_values):
-
-        if not gated_detections:
-            return None
-
-        idx = np.argmin(np.array(innovation_values))
-        return gated_detections[idx]
-
     # ---------------- Update ----------------
-
     def update(self, detection):
+
+        snr_linear = detection.metadata.get("snr_linear", 10.0)
+        snr_linear = np.clip(snr_linear, 0.1, 1e4)
+
+        scale = np.sqrt(self.snr_ref / snr_linear)
+
+        range_std = self.base_range_std * scale
+        bearing_std = self.base_bearing_std * scale
+
+        R_dynamic = np.diag([bearing_std**2, range_std**2])
+
+        dynamic_measurement_model = type(self.measurement_model)(
+            ndim_state=self.measurement_model.ndim_state,
+            mapping=self.measurement_model.mapping,
+            noise_covar=R_dynamic
+        )
+
+        detection.measurement_model = dynamic_measurement_model
 
         measurement_prediction = self.updater.predict_measurement(self.state)
 
         innovation = detection.state_vector - measurement_prediction.state_vector
+
         innovation[0, 0] = np.arctan2(
             np.sin(innovation[0, 0]),
             np.cos(innovation[0, 0])
@@ -328,7 +397,6 @@ class CTTracker:
             self.status = "confirmed"
 
         return d2
-
     # ---------------- Miss Handling ----------------
 
     def handle_miss(self):
@@ -425,6 +493,14 @@ class CTTracker:
         self.status_history.append(self.status)
         self.predicted_range_history.append(rng)
         self.predicted_speed_history.append(speed)
+
+    def associate(self, gated_detections, innovation_values):
+
+        if not gated_detections:
+            return None
+
+        idx = np.argmin(np.array(innovation_values))
+        return gated_detections[idx]
 
 class IMMTracker:
 

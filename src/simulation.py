@@ -350,7 +350,8 @@ def simulate_scene(scene_type="aircraft",
                 Detection(
                     StateVector([noisy_bearing, noisy_range]),
                     timestamp=truth.timestamp,
-                    measurement_model=measurement_model
+                    measurement_model=measurement_model,
+                    metadata={"snr_linear": snr_linear}
                 )
             )
 
