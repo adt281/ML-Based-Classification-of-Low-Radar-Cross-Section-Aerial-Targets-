@@ -84,12 +84,27 @@ def simulate_scene(scene_type="aircraft",
 
     config = TARGET_CONFIG[scene_type]
 
-    heading = np.random.uniform(-np.pi/6, np.pi/6)
-    vx = config["speed"] * np.cos(heading)
-    vy = config["speed"] * np.sin(heading)
+    # ------------------------------------------------------------
+    # Inbound target from fixed 10 km
+    # ------------------------------------------------------------
+
+    initial_range = 15000.0  # 15 km fixed
+    initial_bearing = np.random.uniform(-np.pi/6, np.pi/6)
+
+    # Initial position (10 km from radar)
+    x0 = initial_range * np.cos(initial_bearing)
+    y0 = initial_range * np.sin(initial_bearing)
+
+    # Velocity directed toward radar (origin)
+    dx = -x0
+    dy = -y0
+    norm = np.sqrt(dx**2 + dy**2)
+
+    vx = config["speed"] * dx / norm
+    vy = config["speed"] * dy / norm
 
     truth = GaussianState(
-        StateVector([0, vx, 0, vy]),
+        StateVector([x0, vx, y0, vy]),
         np.diag([1, 1, 1, 1]),
         timestamp=datetime.now()
     )
@@ -332,7 +347,22 @@ def simulate_scene(scene_type="aircraft",
 
             vr_est = (dx*vx + dy*vy) / (det_range + 1e-6)
 
-            if abs(vr_est - target_vr) > 50:
+            # ------------------------------------------------------------
+            # Adaptive Doppler gate (defense-style behavior)
+            # ------------------------------------------------------------
+
+            base_gate = 50.0          # normal Doppler gate (m/s)
+            min_gate = 120.0          # widened gate near zero crossing
+            zero_cross_band = 60.0    # region where widening occurs
+
+            if abs(target_vr) < zero_cross_band:
+                # Linearly widen gate as vr approaches 0
+                scale = 1.0 - abs(target_vr) / zero_cross_band
+                doppler_gate = base_gate + scale * (min_gate - base_gate)
+            else:
+                doppler_gate = base_gate
+
+            if abs(vr_est - target_vr) > doppler_gate:
                 continue
 
             range_std = RADAR_CONFIG["range_std_m"] * \
@@ -493,7 +523,8 @@ def plot_scene(scene_data):
 
 
 if __name__ == "__main__":
-    scene_data = simulate_scene(scene_type="stealth", plot=False)
+    for scene_type in ["stealth", "aircraft"]:
+        scene_data = simulate_scene(scene_type, plot=False)
 
-    #plotting
-    plot_scene(scene_data)
+        #plotting
+        plot_scene(scene_data)
