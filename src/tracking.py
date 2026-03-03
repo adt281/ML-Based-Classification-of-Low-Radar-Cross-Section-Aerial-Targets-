@@ -65,6 +65,7 @@ class CVTracker:
         confidence = snr_linear / (snr_linear + 2.0)
 
         scale = np.sqrt(self.snr_ref / snr_linear)
+        scale = np.clip(scale, 0.7, 1.8)  # prevent instability
 
         range_std = self.base_range_std * scale / np.sqrt(confidence)
         bearing_std = self.base_bearing_std * scale / np.sqrt(confidence)
@@ -232,7 +233,8 @@ class CVTracker:
         if self.status == "tentative" and self.hit_count >= 3:
             self.status = "confirmed"
 
-        return np.log(denominator + 1e-12)
+        effective_likelihood = np.sum(PD * likelihoods)
+        return np.log(effective_likelihood + 1e-12)
 
     # ---------------- Miss Handling ----------------
 
@@ -302,10 +304,9 @@ class CTTracker:
         self.measurement_model = measurement_model
 
         self.transition_model = ConstantTurn(
-            linear_noise_coeffs=[0.012, 0.012],
-            turn_noise_coeff=0.001
+            linear_noise_coeffs=[0.2, 0.2],     # allow velocity diffusion
+            turn_noise_coeff=0.02              # allow realistic turn adaptation
         )
-
         self.predictor = ExtendedKalmanPredictor(self.transition_model)
         self.updater = ExtendedKalmanUpdater(measurement_model)
 
@@ -343,7 +344,7 @@ class CTTracker:
         confidence = snr_linear / (snr_linear + 2.0)
 
         scale = np.sqrt(self.snr_ref / snr_linear)
-
+        scale = np.clip(scale, 0.7, 1.8)  # prevent instability
         range_std = self.base_range_std * scale / np.sqrt(confidence)
         bearing_std = self.base_bearing_std * scale / np.sqrt(confidence)
 
@@ -382,7 +383,7 @@ class CTTracker:
             S = meas_pred.covar
             d2 = (innovation.T @ np.linalg.inv(S) @ innovation).item()
 
-            if d2 < 9.21:   # CT
+            if d2 < 11.83:   # CT
                 gated.append(det)
 
         return gated
@@ -393,7 +394,7 @@ class CTTracker:
 
         PD = self.prob_detection
         lambda_c = self.clutter_density
-        gamma = 9.21
+        gamma = 11.83
 
         # ---------------- MISS ----------------
         if not gated_detections:
@@ -501,14 +502,8 @@ class CTTracker:
         if self.status == "tentative" and self.hit_count >= 3:
             self.status = "confirmed"
 
-        logL = np.log(denominator + 1e-12)
-
-        # Mild curvature regularization
-        omega = self.state.state_vector[4,0]
-        logL -= 0.5 * (omega / 0.15)**2
-
-        return logL
-
+        effective_likelihood = np.sum(PD * likelihoods)
+        return np.log(effective_likelihood + 1e-12)
     # ---------------- Initialization ----------------
 
     def initialize_from_detections(self):
@@ -598,9 +593,9 @@ class IMMTracker:
 
         # Mode transition matrix
         self.PI = np.array(
-            [[0.985, 0.015],
-            [0.015, 0.985]]
-        )
+            [[0.95, 0.05],
+            [0.05, 0.95]]
+        )        
         self.mu_history = []
         self.fused_history = []
 
