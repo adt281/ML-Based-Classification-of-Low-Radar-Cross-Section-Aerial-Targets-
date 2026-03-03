@@ -643,7 +643,19 @@ class IMMTracker:
 
         for j in range(2):
 
+            # ---- Safe mixing ----
             x0 = mu_ij[0,j]*X[0] + mu_ij[1,j]*X[1]
+
+            # If models strongly disagree on velocity direction,
+            # prevent sign inversion
+            v_cv = X[0][1:4:2]  # vx, vy
+            v_ct = X[1][1:4:2]
+
+            if np.dot(v_cv.flatten(), v_ct.flatten()) < 0:
+                # Do NOT mix velocities, keep dominant model velocity
+                dominant = np.argmax(self.mu)
+                x0[1] = X[dominant][1]
+                x0[3] = X[dominant][3]
 
             P0 = (
                 mu_ij[0,j]*(P[0] + (X[0]-x0)@(X[0]-x0).T) +
