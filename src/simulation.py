@@ -118,6 +118,11 @@ def simulate_scene(scene_type="aircraft",
     truth_x, truth_y = [], []
     clutter_x_all, clutter_y_all = [], []
     detect_x_all, detect_y_all = [], []
+
+    # NEW: detection logging for ML
+    detection_positions = []      # positions per scan
+    detection_snr_values = []     # SNR per scan
+
     snr_history = []
     clutter_count_history = []
 
@@ -336,6 +341,9 @@ def simulate_scene(scene_type="aircraft",
 
         step_detections = []
 
+        # NEW buffers for this scan
+        scan_positions = []
+        scan_snrs = []
         target_vr = (x*vx + y*vy) / (R + 1e-6)
 
         radial_velocity_history.append(target_vr)
@@ -383,8 +391,15 @@ def simulate_scene(scene_type="aircraft",
             noisy_range = det_range + np.random.normal(0, range_std)
             noisy_bearing = det_bearing + np.random.normal(0, bearing_std)
 
-            detect_x_all.append(noisy_range * np.cos(noisy_bearing))
-            detect_y_all.append(noisy_range * np.sin(noisy_bearing))
+            x_det = noisy_range * np.cos(noisy_bearing)
+            y_det = noisy_range * np.sin(noisy_bearing)
+
+            detect_x_all.append(x_det)
+            detect_y_all.append(y_det)
+
+            # NEW: store for ML feature extraction
+            scan_positions.append((x_det, y_det))
+            scan_snrs.append(snr_db)
 
             step_detections.append(
                 Detection(
@@ -396,6 +411,10 @@ def simulate_scene(scene_type="aircraft",
             )
 
         detections.append(step_detections)
+
+        # NEW logging
+        detection_positions.append(scan_positions)
+        detection_snr_values.append(scan_snrs)
         detection_count = len(step_detections)
         detection_count_history.append(detection_count)
         detection_presence_history.append(detection_count > 0)
@@ -472,7 +491,11 @@ def simulate_scene(scene_type="aircraft",
 
         "measurements": {
             "detections": detections,
-            "measurement_model": measurement_model
+            "measurement_model": measurement_model,
+
+            # NEW for ML
+            "detection_positions": detection_positions,
+            "detection_snrs": detection_snr_values
         },
 
         "plot_data": {

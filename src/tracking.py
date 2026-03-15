@@ -51,6 +51,12 @@ class CVTracker:
         self.cov_trace_history = []
         self.status_history = []
 
+        # --- ML logging ---
+        self.gated_count_history = []
+        self.innovation_history = []
+        self.miss_history = []
+        self.initialization_time = None
+
     # ---------------- Prediction ----------------
 
     def predict(self):
@@ -58,6 +64,7 @@ class CVTracker:
         self.state = self.predictor.predict(self.state, timestamp=new_timestamp)
 
     # ---------------- Build dynamic measurement model ----------------
+
     def build_dynamic_model(self, det):
         snr_linear = det.metadata.get("snr_linear", 10.0)
         snr_linear = np.clip(snr_linear, 0.05, 1e4)
@@ -65,7 +72,7 @@ class CVTracker:
         confidence = snr_linear / (snr_linear + 2.0)
 
         scale = np.sqrt(self.snr_ref / snr_linear)
-        scale = np.clip(scale, 0.7, 1.8)  # prevent instability
+        scale = np.clip(scale, 0.7, 1.8)
 
         range_std = self.base_range_std * scale / np.sqrt(confidence)
         bearing_std = self.base_bearing_std * scale / np.sqrt(confidence)
@@ -83,6 +90,7 @@ class CVTracker:
     def gate(self, detections):
 
         if not detections:
+            self.gated_count_history.append(0)
             return []
 
         gated = []
@@ -107,9 +115,10 @@ class CVTracker:
             S = meas_pred.covar
             d2 = (innovation.T @ np.linalg.inv(S) @ innovation).item()
 
-            if d2 < 11.83:   # CV
+            if d2 < 11.83:
                 gated.append(det)
 
+        self.gated_count_history.append(len(gated))
         return gated
 
     # ---------------- Update (PDA) ----------------
@@ -129,6 +138,7 @@ class CVTracker:
 
             logL = np.log((1 - PD) * lambda_c * V + 1e-12)
 
+            self.miss_history.append(1)
             self.handle_miss()
             return logL
 
@@ -156,11 +166,13 @@ class CVTracker:
                 np.cos(innovation[0, 0])
             )
 
+            # --- log innovation magnitude ---
+            self.innovation_history.append(np.linalg.norm(innovation))
+
             S = meas_pred.covar
             Sinv = np.linalg.inv(S)
             d2 = (innovation.T @ Sinv @ innovation).item()
 
-            # ---- HARD REJECTION ----
             if d2 > gamma:
                 continue
 
@@ -179,12 +191,12 @@ class CVTracker:
                 dyn_model_reference = dyn_model
         
         if S_reference is None:
-                self.handle_miss()
-                return np.log(1e-12)
+            self.miss_history.append(1)
+            self.handle_miss()
+            return np.log(1e-12)
                 
         likelihoods = np.array(likelihoods)
 
-        # Gate volume (use reference S)
         V = np.pi * gamma * np.sqrt(np.linalg.det(S_reference))
 
         numerator = PD * likelihoods
@@ -193,10 +205,8 @@ class CVTracker:
         betas = numerator / (denominator + 1e-12)
         beta_0 = (1 - PD) * lambda_c * V / (denominator + 1e-12)
 
-        # --------- Gain computed with SAME dynamic model ----------
         H = dyn_model_reference.jacobian(self.state)
         K = self.state.covar @ H.T @ np.linalg.inv(S_reference)
-
 
         innovation_bar = sum(
             betas[i] * innovations[i]
@@ -210,7 +220,6 @@ class CVTracker:
 
         P_new = beta_0 * P + (1 - beta_0) * (I - K @ H) @ P
 
-        # Spread term
         spread = np.zeros_like(P)
         for i in range(len(innovations)):
             diff = innovations[i] - innovation_bar
@@ -218,7 +227,6 @@ class CVTracker:
 
         P_new += spread
 
-        # Covariance sanity limit
         if np.trace(P_new) > 5e6:
             self.status = "deleted"
             self.initialized = False
@@ -226,6 +234,8 @@ class CVTracker:
 
         self.state.state_vector = x_new
         self.state.covar = P_new
+
+        self.miss_history.append(0)
 
         self.consecutive_misses = 0
         self.hit_count += 1
@@ -281,6 +291,7 @@ class CVTracker:
                 self.state = GaussianState(initial_state, P, timestamp=d2.timestamp)
                 self.initialized = True
                 self.hit_count = 2
+                self.initialization_time = d2.timestamp
 
             return
 
@@ -295,7 +306,7 @@ class CVTracker:
         self.status_history.append(self.status)
 
         return logL
- 
+
 class CTTracker:
 
     def __init__(self, dt, measurement_model):
@@ -304,8 +315,8 @@ class CTTracker:
         self.measurement_model = measurement_model
 
         self.transition_model = ConstantTurn(
-            linear_noise_coeffs=[0.2, 0.2],     # allow velocity diffusion
-            turn_noise_coeff=0.02              # allow realistic turn adaptation
+            linear_noise_coeffs=[0.2, 0.2],
+            turn_noise_coeff=0.02
         )
         self.predictor = ExtendedKalmanPredictor(self.transition_model)
         self.updater = ExtendedKalmanUpdater(measurement_model)
@@ -329,6 +340,12 @@ class CTTracker:
         self.cov_trace_history = []
         self.status_history = []
 
+        # --- ML logging ---
+        self.gated_count_history = []
+        self.innovation_history = []
+        self.miss_history = []
+        self.initialization_time = None
+
     # ---------------- Prediction ----------------
 
     def predict(self):
@@ -336,6 +353,7 @@ class CTTracker:
         self.state = self.predictor.predict(self.state, timestamp=new_timestamp)
 
     # ---------------- Build dynamic model ----------------
+
     def build_dynamic_model(self, det):
 
         snr_linear = det.metadata.get("snr_linear", 10.0)
@@ -344,7 +362,8 @@ class CTTracker:
         confidence = snr_linear / (snr_linear + 2.0)
 
         scale = np.sqrt(self.snr_ref / snr_linear)
-        scale = np.clip(scale, 0.7, 1.8)  # prevent instability
+        scale = np.clip(scale, 0.7, 1.8)
+
         range_std = self.base_range_std * scale / np.sqrt(confidence)
         bearing_std = self.base_bearing_std * scale / np.sqrt(confidence)
 
@@ -355,10 +374,13 @@ class CTTracker:
             mapping=self.measurement_model.mapping,
             noise_covar=R_dynamic
         )
+
     # ---------------- Gating ----------------
+
     def gate(self, detections):
 
         if not detections:
+            self.gated_count_history.append(0)
             return []
 
         gated = []
@@ -383,9 +405,10 @@ class CTTracker:
             S = meas_pred.covar
             d2 = (innovation.T @ np.linalg.inv(S) @ innovation).item()
 
-            if d2 < 11.83:   # CT
+            if d2 < 11.83:
                 gated.append(det)
 
+        self.gated_count_history.append(len(gated))
         return gated
 
     # ---------------- Update (PDA) ----------------
@@ -396,7 +419,6 @@ class CTTracker:
         lambda_c = self.clutter_density
         gamma = 11.83
 
-        # ---------------- MISS ----------------
         if not gated_detections:
 
             meas_pred = self.updater.predict_measurement(self.state)
@@ -405,10 +427,9 @@ class CTTracker:
 
             logL = np.log((1 - PD) * lambda_c * V + 1e-12)
 
+            self.miss_history.append(1)
             self.handle_miss()
             return logL
-
-        # ---------------- PDA ----------------
 
         innovations = []
         likelihoods = []
@@ -432,11 +453,13 @@ class CTTracker:
                 np.cos(innovation[0, 0])
             )
 
+            # --- log innovation magnitude ---
+            self.innovation_history.append(np.linalg.norm(innovation))
+
             S = meas_pred.covar
             Sinv = np.linalg.inv(S)
             d2 = (innovation.T @ Sinv @ innovation).item()
 
-            # ---- HARD REJECTION ----
             if d2 > gamma:
                 continue
 
@@ -454,6 +477,11 @@ class CTTracker:
                 S_reference = S
                 dyn_model_reference = dyn_model
 
+        if S_reference is None:
+            self.miss_history.append(1)
+            self.handle_miss()
+            return np.log(1e-12)
+
         likelihoods = np.array(likelihoods)
 
         V = np.pi * gamma * np.sqrt(np.linalg.det(S_reference))
@@ -464,7 +492,6 @@ class CTTracker:
         betas = numerator / (denominator + 1e-12)
         beta_0 = (1 - PD) * lambda_c * V / (denominator + 1e-12)
 
-        # ---- Gain must use SAME dynamic model ----
         H = dyn_model_reference.jacobian(self.state)
         K = self.state.covar @ H.T @ np.linalg.inv(S_reference)
 
@@ -487,7 +514,6 @@ class CTTracker:
 
         P_new += spread
 
-        # ---- Covariance sanity bound ----
         if np.trace(P_new) > 5e6:
             self.status = "deleted"
             self.initialized = False
@@ -495,6 +521,8 @@ class CTTracker:
 
         self.state.state_vector = x_new
         self.state.covar = P_new
+
+        self.miss_history.append(0)
 
         self.consecutive_misses = 0
         self.hit_count += 1
@@ -504,6 +532,7 @@ class CTTracker:
 
         effective_likelihood = np.sum(PD * likelihoods)
         return np.log(effective_likelihood + 1e-12)
+
     # ---------------- Initialization ----------------
 
     def initialize_from_detections(self):
@@ -542,6 +571,7 @@ class CTTracker:
         self.state = GaussianState(initial_state, P, timestamp=d2.timestamp)
         self.initialized = True
         self.hit_count = 2
+        self.initialization_time = d2.timestamp
 
         return True
 
@@ -579,7 +609,7 @@ class CTTracker:
         self.cov_trace_history.append(np.trace(self.state.covar))
         self.status_history.append(self.status)
 
-        return logL
+        return logL    
 
 class IMMTracker:
 
@@ -598,6 +628,11 @@ class IMMTracker:
         )        
         self.mu_history = []
         self.fused_history = []
+
+        # --- ML logging ---
+        self.mode_switch_count = 0
+        self.last_mode = None
+        self.mode_history = []
 
     # ---------------- Interaction ----------------
 
@@ -697,7 +732,13 @@ class IMMTracker:
 
         self.mu = np.exp(log_mu_post)
         self.mu_history.append(self.mu.copy())
+        current_mode = np.argmax(self.mu)
 
+        if self.last_mode is not None and current_mode != self.last_mode:
+            self.mode_switch_count += 1
+
+        self.last_mode = current_mode
+        self.mode_history.append(current_mode)
     # ---------------- Fusion ----------------
 
     def fuse(self):
@@ -732,6 +773,64 @@ class IMMTracker:
         self.fused_history.append(x_fused.copy())
 
 
+def run_tracking(scene_type, num_steps=80):
+
+    scene = simulate_scene(scene_type, num_steps=num_steps, plot=False)
+
+    cv = CVTracker(
+        dt=scene["metadata"]["dt"],
+        measurement_model=scene["measurements"]["measurement_model"],
+        process_noise_scale=2
+    )
+
+    ct = CTTracker(
+        dt=scene["metadata"]["dt"],
+        measurement_model=scene["measurements"]["measurement_model"]
+    )
+
+    imm = IMMTracker(cv, ct)
+
+    for detections in scene["measurements"]["detections"]:
+
+        # Track initialization
+        if not cv.initialized:
+            cv.step(detections)
+
+        if not ct.initialized:
+            ct.step(detections)
+
+        if not (cv.initialized and ct.initialized):
+            continue
+
+        # IMM interaction
+        imm.interaction()
+
+        # Predict
+        cv.predict()
+        ct.predict()
+
+        # CV update
+        gated_cv = cv.gate(detections)
+        logL_cv = cv.update(gated_cv)
+
+        # CT update
+        gated_ct = ct.gate(detections)
+        logL_ct = ct.update(gated_ct)
+
+        # IMM update
+        imm.update_mode_probabilities(logL_cv, logL_ct)
+
+        # Fusion
+        imm.fuse()
+
+    return {
+        "scene": scene,
+        "cv_tracker": cv,
+        "ct_tracker": ct,
+        "imm_tracker": imm,
+        "fused_history": np.array(imm.fused_history),
+        "mode_probabilities": np.array(imm.mu_history)
+    }
 # ============================================================
 # ======================= MAIN ===============================
 # ============================================================

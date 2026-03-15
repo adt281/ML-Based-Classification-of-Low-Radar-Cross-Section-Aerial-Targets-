@@ -1,81 +1,141 @@
-import pandas as pd
-from tqdm import tqdm
+''' .csv for smoke testing [since human readable] and .npz for actual ML training '''
 
-from src.simulation import simulate_scene
-from src.tracking import run_tracker
-from src.feature_extraction import extract_features
+import numpy as np
+from feature_extraction import extract_features_timestep
+from tracking import run_tracking
+from feature_extraction import export_csv
 
+# -------------------------------------------------
+# Label mapping
+# -------------------------------------------------
 
-# ============================================================
-# Scene Selection Per Stage
-# ============================================================
-
-STAGE_SCENE_MAP = {
-    "stage1": ["noise", "bird", "aircraft", "stealth"],
-    "stage2": ["bird", "aircraft", "stealth"],
-    "stage3": ["aircraft", "stealth"]
+LABEL_MAP = {
+    "empty": 0,
+    "aircraft": 1,
+    "stealth": 2
 }
 
 
-def generate_dataset(stage="stage1", samples_per_class=300):
+# -------------------------------------------------
+# Generate dataset from one scene
+# -------------------------------------------------
 
-    if stage not in STAGE_SCENE_MAP:
-        raise ValueError("Invalid stage. Choose: stage1, stage2, stage3")
+def generate_scene_dataset(scene_type, num_steps=80):
 
-    data = []
-    scene_types = STAGE_SCENE_MAP[stage]
+    result = run_tracking(scene_type, num_steps=num_steps)
 
-    for scene_type in scene_types:
+    scene = result["scene"]
+    num_steps = scene["metadata"]["num_steps"]
 
-        print(f"\nGenerating data for: {scene_type}")
+    X_scene = []
+    y_scene = []
 
-        for _ in tqdm(range(samples_per_class)):
+    label = LABEL_MAP[scene_type]
 
-            truth_states, detections, transition_model, measurement_model, metadata = simulate_scene(
-                scene_type=scene_type
-            )
+    for t in range(num_steps):
 
-            # -------------------------
-            # Noise case (no tracker)
-            # -------------------------
-            if scene_type == "noise":
+        features = extract_features_timestep(result, t)
 
-                features = {
-                    "mean_speed": 0.0,
-                    "speed_variance": 0.0,
-                    "acceleration_variance": 0.0,
-                    "mean_cov_trace": 0.0,
-                    "cov_growth_rate": 0.0,
-                    "detection_ratio": 0.0,
-                    "first_detection_range": 0.0,
-                    "mean_detection_range": 0.0,
-                    "std_detection_range": 0.0,
-                    "max_detection_gap": len(detections),
-                    "mean_detection_gap": len(detections)
-                }
+        X_scene.append(features)
+        y_scene.append(label)
 
-            else:
-                track = run_tracker(
-                    truth_states,
-                    detections,
-                    transition_model,
-                    measurement_model
-                )
-
-                features = extract_features(track, detections)
-
-            # Attach hierarchical labels
-            features["stage1_label"] = metadata["stage1"]
-            features["stage2_label"] = metadata["stage2"]
-            features["stage3_label"] = metadata["stage3"]
-
-            data.append(features)
-
-    df = pd.DataFrame(data)
-
-    return df
+    return np.array(X_scene), np.array(y_scene)
 
 
+# -------------------------------------------------
+# Build full dataset
+# -------------------------------------------------
+
+def build_dataset(
+        aircraft_scenes=1,
+        stealth_scenes=1,
+        empty_scenes=1,
+        num_steps=80):
+
+    X_all = []
+    y_all = []
+
+    # Aircraft scenes
+    for i in range(aircraft_scenes):
+
+        X, y = generate_scene_dataset("aircraft", num_steps)
+
+        X_all.append(X)
+        y_all.append(y)
+
+        if (i+1) % 50 == 0:
+            print(f"Aircraft scenes generated: {i+1}")
+
+    # Stealth scenes
+    for i in range(stealth_scenes):
+
+        X, y = generate_scene_dataset("stealth", num_steps)
+
+        X_all.append(X)
+        y_all.append(y)
+
+        if (i+1) % 50 == 0:
+            print(f"Stealth scenes generated: {i+1}")
+
+    # Empty scenes
+    for i in range(empty_scenes):
+
+        X, y = generate_scene_dataset("empty", num_steps)
+
+        X_all.append(X)
+        y_all.append(y)
+
+        if (i+1) % 50 == 0:
+            print(f"Empty scenes generated: {i+1}")
+
+    X_all = np.vstack(X_all)
+    y_all = np.hstack(y_all)
+
+    return X_all, y_all
+
+
+# -------------------------------------------------
+# Save dataset
+# -------------------------------------------------
+
+def save_dataset(X, y, filename="radar_dataset.npz"):
+
+    np.savez_compressed(
+        filename,
+        X=X,
+        y=y
+    )
+
+    print("Dataset saved:", filename)
+    print("Samples:", X.shape[0])
+    print("Features:", X.shape[1])
+
+
+# -------------------------------------------------
+# Load dataset
+# -------------------------------------------------
+
+def load_dataset(filename="radar_dataset.npz"):
+
+    data = np.load(filename)
+
+    X = data["X"]
+    y = data["y"]
+
+    return X, y
+
+
+# -------------------------------------------------
+# Main (dataset generation)
+# -------------------------------------------------
 if __name__ == "__main__":
-    df = generate_dataset(stage="stage1", samples_per_class=50)
-    print(df.head())
+
+    X, y = build_dataset(
+        aircraft_scenes=1,
+        stealth_scenes=1,
+        empty_scenes=1
+    )
+
+    save_dataset(X, y)
+
+    export_csv(X, y)

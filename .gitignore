@@ -31,3 +31,7 @@ dist/
 # Trained models
 *.pkl
 *.joblib
+
+#saved feature file: 
+*.npz
+*.csv

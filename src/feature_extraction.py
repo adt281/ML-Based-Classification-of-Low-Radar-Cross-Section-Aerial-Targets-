@@ -1,111 +1,293 @@
+''' .csv for smoke testing [since human readable] and .npz for actual ML training '''
+
 import numpy as np
+import pandas as pd
+from tracking import run_tracking
+
+FEATURE_NAMES = [
+    "mean_snr",
+    "snr_variance",
+    "snr_trend",
+
+    "total_detections",
+    "detections_per_scan_std",
+    "max_detections_in_scan",
+    "longest_detection_gap",
+    "detection_presence_ratio",
+    "detection_burst_count",
+
+    "centroid_motion_speed",
+    "centroid_motion_variance",
+
+    "track_initialized",
+    "time_to_track_initialization",
+    "track_length",
+    "covariance_trace_mean",
+    "covariance_trace_growth",
+    "covariance_trace_std",
+
+    "mean_CV_probability",
+    "mean_CT_probability",
+    "mode_switch_count",
+    "mode_probability_variance",
+
+    "gated_detections_mean",
+    "tracker_miss_ratio",
+    "innovation_magnitude_mean",
+    "detections_inside_gate_ratio"
+]
+
+# ---------------- Utility helpers ----------------
+
+def safe_mean(x):
+    if len(x) == 0:
+        return 0.0
+    return float(np.mean(x))
 
 
-def extract_features(track, detections):
+def safe_var(x):
+    if len(x) < 2:
+        return 0.0
+    return float(np.var(x))
 
-    if track is None:
-        # Noise-only scene
-        return {
-            "mean_speed": 0.0,
-            "speed_variance": 0.0,
-            "acceleration_variance": 0.0,
-            "mean_cov_trace": 0.0,
-            "cov_growth_rate": 0.0,
-            "detection_ratio": 0.0,
-            "first_detection_range": 0.0,
-            "mean_detection_range": 0.0,
-            "std_detection_range": 0.0,
-            "max_detection_gap": 0,
-            "mean_detection_gap": 0
-        }
 
-    vx_list = []
-    vy_list = []
-    cov_traces = []
+def snr_trend(snr_series):
+    if len(snr_series) < 3:
+        return 0.0
 
-    detection_ranges = []
-    detection_count = 0
+    x = np.arange(len(snr_series))
+    y = np.array(snr_series)
 
-    for i, (state, detection_list) in enumerate(zip(track[1:], detections)):
+    slope = np.polyfit(x, y, 1)[0]
+    return float(slope)
 
-        vx = state.state_vector[1, 0]
-        vy = state.state_vector[3, 0]
 
-        vx_list.append(vx)
-        vy_list.append(vy)
+def longest_zero_run(binary_series):
 
-        cov_traces.append(np.trace(state.covar))
+    longest = 0
+    current = 0
 
-        if detection_list is not None and len(detection_list) > 0:
-            detection_count += 1
-
-            # Use first detection (already gated by tracker)
-            det = detection_list[0]
-            range_ = det.state_vector[1, 0]
-            detection_ranges.append(range_)
-
-    vx_list = np.array(vx_list)
-    vy_list = np.array(vy_list)
-    cov_traces = np.array(cov_traces)
-
-    speed = np.sqrt(vx_list**2 + vy_list**2)
-
-    ax = np.diff(vx_list)
-    ay = np.diff(vy_list)
-
-    if len(speed) > 1:
-        acceleration = np.sqrt(ax**2 + ay**2) / (speed[:-1] + 1e-6)
-        acceleration_variance = np.var(acceleration)
-    else:
-        acceleration_variance = 0.0
-
-    detection_ratio = detection_count / len(detections)
-
-    if len(detection_ranges) > 0:
-        first_detection_range = detection_ranges[0]
-        mean_detection_range = np.mean(detection_ranges)
-        std_detection_range = np.std(detection_ranges)
-    else:
-        first_detection_range = 0.0
-        mean_detection_range = 0.0
-        std_detection_range = 0.0
-
-    gaps = []
-    current_gap = 0
-
-    for d_list in detections:
-        if d_list is None or len(d_list) == 0:
-            current_gap += 1
+    for v in binary_series:
+        if v == 0:
+            current += 1
+            longest = max(longest, current)
         else:
-            if current_gap > 0:
-                gaps.append(current_gap)
-                current_gap = 0
+            current = 0
 
-    if current_gap > 0:
-        gaps.append(current_gap)
+    return longest
 
-    if len(gaps) > 0:
-        max_gap = np.max(gaps)
-        mean_gap = np.mean(gaps)
+
+def burst_count(binary_series):
+
+    bursts = 0
+    prev = 0
+
+    for v in binary_series:
+        if v == 1 and prev == 0:
+            bursts += 1
+        prev = v
+
+    return bursts
+
+
+def centroid_motion(detection_positions):
+
+    centroids = []
+
+    for scan in detection_positions:
+        if len(scan) == 0:
+            continue
+
+        xs = [p[0] for p in scan]
+        ys = [p[1] for p in scan]
+
+        centroids.append((np.mean(xs), np.mean(ys)))
+
+    if len(centroids) < 2:
+        return 0.0, 0.0
+
+    speeds = []
+
+    for i in range(1, len(centroids)):
+        dx = centroids[i][0] - centroids[i-1][0]
+        dy = centroids[i][1] - centroids[i-1][1]
+        speeds.append(np.sqrt(dx**2 + dy**2))
+
+    return safe_mean(speeds), safe_var(speeds)
+
+
+# ---------------- Core feature extractor ----------------
+
+def extract_features_timestep(result, t):
+
+    scene = result["scene"]
+    cv = result["cv_tracker"]
+    ct = result["ct_tracker"]
+    imm = result["imm_tracker"]
+
+    radar = scene["radar_metrics"]
+    measurements = scene["measurements"]
+
+    snr_series = radar["snr_db"][:t+1]
+    detection_count = radar["detection_count"][:t+1]
+    detection_presence = radar["detection_presence"][:t+1]
+
+    detection_positions = measurements["detection_positions"][:t+1]
+
+    # ------------------------------------------------
+    # Radar signal
+    # ------------------------------------------------
+
+    mean_snr = safe_mean(snr_series)
+    snr_variance = safe_var(snr_series)
+    snr_tr = snr_trend(snr_series)
+
+    # ------------------------------------------------
+    # Detection statistics
+    # ------------------------------------------------
+
+    total_detections = int(np.sum(detection_count))
+    detections_per_scan_std = safe_var(detection_count)
+    max_detections_in_scan = int(np.max(detection_count)) if len(detection_count) else 0
+
+    longest_gap = longest_zero_run(detection_presence)
+    detection_presence_ratio = safe_mean(detection_presence)
+    detection_bursts = burst_count(detection_presence)
+
+    # ------------------------------------------------
+    # Spatial coherence
+    # ------------------------------------------------
+
+    centroid_speed, centroid_var = centroid_motion(detection_positions)
+
+    # ------------------------------------------------
+    # Tracker behaviour
+    # ------------------------------------------------
+
+    track_initialized = int(cv.initialized)
+
+    if cv.initialization_time is None:
+        time_to_init = t + 1
     else:
-        max_gap = 0
-        mean_gap = 0
+        time_to_init = len(cv.estimate_history)
 
-    if len(cov_traces) > 1:
-        cov_growth = np.polyfit(range(len(cov_traces)), cov_traces, 1)[0]
+    track_length = len(cv.estimate_history)
+
+    cov_trace = cv.cov_trace_history[:track_length]
+
+    cov_mean = safe_mean(cov_trace)
+    cov_growth = cov_trace[-1] - cov_trace[0] if len(cov_trace) > 1 else 0
+    cov_std = safe_var(cov_trace)
+
+    # ------------------------------------------------
+    # IMM behaviour
+    # ------------------------------------------------
+
+    mu = np.array(imm.mu_history[:t+1])
+
+    if len(mu) > 0:
+        mean_cv_prob = safe_mean(mu[:,0])
+        mean_ct_prob = safe_mean(mu[:,1])
+        mode_var = safe_var(mu[:,0])
     else:
-        cov_growth = 0.0
+        mean_cv_prob = 0
+        mean_ct_prob = 0
+        mode_var = 0
 
-    return {
-        "mean_speed": np.mean(speed),
-        "speed_variance": np.var(speed),
-        "acceleration_variance": acceleration_variance,
-        "mean_cov_trace": np.mean(cov_traces),
-        "cov_growth_rate": cov_growth,
-        "detection_ratio": detection_ratio,
-        "first_detection_range": first_detection_range,
-        "mean_detection_range": mean_detection_range,
-        "std_detection_range": std_detection_range,
-        "max_detection_gap": max_gap,
-        "mean_detection_gap": mean_gap
+    mode_switch_count = imm.mode_switch_count
+
+    # ------------------------------------------------
+    # Detection–tracker interaction
+    # ------------------------------------------------
+
+    gated_counts = cv.gated_count_history[:t+1]
+    gated_mean = safe_mean(gated_counts)
+
+    misses = cv.miss_history[:t+1]
+    miss_ratio = safe_mean(misses)
+
+    innovations = cv.innovation_history[:t+1]
+    innovation_mean = safe_mean(innovations)
+
+    detections_inside_gate_ratio = gated_mean / (safe_mean(detection_count) + 1e-6)
+
+    # ------------------------------------------------
+    # Feature vector
+    # ------------------------------------------------
+
+    features = np.array([
+        mean_snr,
+        snr_variance,
+        snr_tr,
+
+        total_detections,
+        detections_per_scan_std,
+        max_detections_in_scan,
+        longest_gap,
+        detection_presence_ratio,
+        detection_bursts,
+
+        centroid_speed,
+        centroid_var,
+
+        track_initialized,
+        time_to_init,
+        track_length,
+        cov_mean,
+        cov_growth,
+        cov_std,
+
+        mean_cv_prob,
+        mean_ct_prob,
+        mode_switch_count,
+        mode_var,
+
+        gated_mean,
+        miss_ratio,
+        innovation_mean,
+        detections_inside_gate_ratio
+    ])
+
+    return features
+
+
+# ---------------- Dataset builder ----------------
+
+def build_timestep_dataset(scene_type):
+
+    result = run_tracking(scene_type)
+
+    scene = result["scene"]
+    num_steps = scene["metadata"]["num_steps"]
+
+    X = []
+    y = []
+
+    label_map = {
+        "aircraft": 1,
+        "stealth": 2,
+        "empty": 0
     }
+
+    label = label_map[scene_type]
+
+    for t in range(num_steps):
+
+        features = extract_features_timestep(result, t)
+
+        X.append(features)
+        y.append(label)
+
+    return np.array(X), np.array(y)
+
+import pandas as pd
+
+# ----------------- .csv export helper  -----------------
+def export_csv(X, y, filename="radar_dataset_debug.csv"):
+
+    df = pd.DataFrame(X, columns=FEATURE_NAMES)
+    df["label"] = y
+
+    df.to_csv(filename, index=False)
+
+    print("CSV exported:", filename)
