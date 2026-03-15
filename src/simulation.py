@@ -17,6 +17,7 @@ TARGET_CONFIG = {
     "bird": {"speed": 50, "process_noise": 2.0, "rcs": 0.01},
     "aircraft": {"speed": 250.0, "process_noise": 0.1, "rcs": 5.0},
     "stealth": {"speed": 250.0, "process_noise": 0.1, "rcs": 0.01},
+    "empty": None
 }
 
 MANEUVER_CONFIG = {
@@ -82,33 +83,35 @@ def simulate_scene(scene_type="aircraft",
         ])
     )
 
-    config = TARGET_CONFIG[scene_type]
+    config = TARGET_CONFIG.get(scene_type)
+    has_target = config is not None
+
+    truth = None
 
     # ------------------------------------------------------------
     # Inbound target from fixed 10 km
     # ------------------------------------------------------------
 
-    initial_range = 15000.0  # 15 km fixed
-    initial_bearing = np.random.uniform(-np.pi/6, np.pi/6)
+    if has_target:
 
-    # Initial position (10 km from radar)
-    x0 = initial_range * np.cos(initial_bearing)
-    y0 = initial_range * np.sin(initial_bearing)
+        initial_range = 15000.0
+        initial_bearing = np.random.uniform(-np.pi/6, np.pi/6)
 
-    # Velocity directed toward radar (origin)
-    dx = -x0
-    dy = -y0
-    norm = np.sqrt(dx**2 + dy**2)
+        x0 = initial_range * np.cos(initial_bearing)
+        y0 = initial_range * np.sin(initial_bearing)
 
-    vx = config["speed"] * dx / norm
-    vy = config["speed"] * dy / norm
+        dx = -x0
+        dy = -y0
+        norm = np.sqrt(dx**2 + dy**2)
 
-    truth = GaussianState(
-        StateVector([x0, vx, y0, vy]),
-        np.diag([1, 1, 1, 1]),
-        timestamp=datetime.now()
-    )
+        vx = config["speed"] * dx / norm
+        vy = config["speed"] * dy / norm
 
+        truth = GaussianState(
+            StateVector([x0, vx, y0, vy]),
+            np.diag([1,1,1,1]),
+            timestamp=datetime.now()
+        )
     truth_states = []
     detections = []
 
@@ -137,15 +140,20 @@ def simulate_scene(scene_type="aircraft",
 
     for step in range(num_steps):
 
-        truth_states.append(truth)
+        if has_target:
+            truth_states.append(truth)
 
-        x = truth.state_vector[0, 0]
-        y = truth.state_vector[2, 0]
-        vx = truth.state_vector[1, 0]
-        vy = truth.state_vector[3, 0]
+            x = truth.state_vector[0, 0]
+            y = truth.state_vector[2, 0]
+            vx = truth.state_vector[1, 0]
+            vy = truth.state_vector[3, 0]
 
-        R = np.sqrt(x**2 + y**2) + 1e-6
-        B = np.arctan2(y, x)
+            R = np.sqrt(x**2 + y**2) + 1e-6
+            B = np.arctan2(y, x)
+        else:
+            x = y = vx = vy = 0.0
+            R = np.random.uniform(1000, max_range)
+            B = np.random.uniform(-np.pi, np.pi)
 
         time_history.append(step * dt)
         range_history.append(R)
@@ -159,23 +167,25 @@ def simulate_scene(scene_type="aircraft",
         # ============================================================
         # TARGET
         # ============================================================
+        if has_target:
 
-        rcs_fluct = np.random.exponential(scale=config["rcs"])
-        target_power = (RADAR_CONFIG["Pt"] * rcs_fluct) / (R**4)
+            rcs_fluct = np.random.exponential(scale=config["rcs"])
+            target_power = (RADAR_CONFIG["Pt"] * rcs_fluct) / (R**4)
 
-        snr = target_power / RADAR_CONFIG["noise_floor"]
-        snr_history.append(10 * np.log10(snr + 1e-12))
+            snr = target_power / RADAR_CONFIG["noise_floor"]
+            snr_history.append(10 * np.log10(snr + 1e-12))
 
-        r_idx = np.argmin(np.abs(range_bins - R))
-        b_idx = np.argmin(np.abs(bearing_bins - B))
+            r_idx = np.argmin(np.abs(range_bins - R))
+            b_idx = np.argmin(np.abs(bearing_bins - B))
 
-        power_map[r_idx, b_idx] += target_power
-
+            power_map[r_idx, b_idx] += target_power
+        else:
+            snr_history.append(-40)
         # ============================================================
         # CLUTTER
         # ============================================================
 
-        clutter_rate = 2 + 10 * (R / max_range)**2
+        clutter_rate = 6
         clutter_count = np.random.poisson(clutter_rate)
         clutter_count_history.append(clutter_count)
 
@@ -379,7 +389,7 @@ def simulate_scene(scene_type="aircraft",
             step_detections.append(
                 Detection(
                     StateVector([noisy_bearing, noisy_range]),
-                    timestamp=truth.timestamp,
+                    timestamp=datetime.now() + timedelta(seconds=step*dt),
                     measurement_model=measurement_model,
                     metadata={"snr_linear": snr_linear}
                 )
@@ -394,53 +404,54 @@ def simulate_scene(scene_type="aircraft",
         # ============================================================
         # MOTION PROPAGATION (unchanged)
         # ============================================================
+        if has_target:
 
-        speed = np.sqrt(vx**2 + vy**2)
-        heading = np.arctan2(vy, vx)
+            speed = np.sqrt(vx**2 + vy**2)
+            heading = np.arctan2(vy, vx)
 
-        maneuver_cfg = MANEUVER_CONFIG[scene_type]
+            maneuver_cfg = MANEUVER_CONFIG[scene_type]
 
-        if maneuver_steps_remaining == 0:
-            if np.random.rand() < maneuver_cfg["maneuver_prob"]:
-                maneuver_steps_remaining = np.random.randint(
-                    maneuver_cfg["maneuver_duration_min"],
-                    maneuver_cfg["maneuver_duration_max"]
-                )
+            if maneuver_steps_remaining == 0:
+                if np.random.rand() < maneuver_cfg["maneuver_prob"]:
+                    maneuver_steps_remaining = np.random.randint(
+                        maneuver_cfg["maneuver_duration_min"],
+                        maneuver_cfg["maneuver_duration_max"]
+                    )
 
-        if maneuver_steps_remaining > 0:
-            heading += np.radians(np.random.uniform(-20, 20))
-            maneuver_steps_remaining -= 1
+            if maneuver_steps_remaining > 0:
+                heading += np.radians(np.random.uniform(-20, 20))
+                maneuver_steps_remaining -= 1
 
-        if scene_type == "bird":
-            speed += np.random.normal(0, 2.0)
-            speed = max(speed, 5.0)
+            if scene_type == "bird":
+                speed += np.random.normal(0, 2.0)
+                speed = max(speed, 5.0)
 
-        vx = speed * np.cos(heading)
-        vy = speed * np.sin(heading)
+            vx = speed * np.cos(heading)
+            vy = speed * np.sin(heading)
 
-        vx += np.random.normal(0, config["process_noise"])
-        vy += np.random.normal(0, config["process_noise"])
+            vx += np.random.normal(0, config["process_noise"])
+            vy += np.random.normal(0, config["process_noise"])
 
-        x += vx * dt
-        y += vy * dt
+            x += vx * dt
+            y += vy * dt
 
-        truth = GaussianState(
-            StateVector([x, vx, y, vy]),
-            truth.covar,
-            timestamp=truth.timestamp + timedelta(seconds=dt)
-        )
-
+            truth = GaussianState(
+                StateVector([x, vx, y, vy]),
+                truth.covar,
+                timestamp=truth.timestamp + timedelta(seconds=dt)
+            )
     
 
     
     scene_data = {
+        
         "metadata": {
             "scene_type": scene_type,
             "num_steps": num_steps,
             "dt": dt,
-            "target_config": TARGET_CONFIG[scene_type],
+            "target_config": TARGET_CONFIG.get(scene_type),
             "radar_config": RADAR_CONFIG,
-            "maneuver_config": MANEUVER_CONFIG[scene_type]
+            "maneuver_config": MANEUVER_CONFIG.get(scene_type)
         },
 
         "truth": {
@@ -523,7 +534,7 @@ def plot_scene(scene_data):
 
 
 if __name__ == "__main__":
-    for scene_type in ["stealth", "aircraft"]:
+    for scene_type in ["aircraft", "stealth", "empty"]:
         scene_data = simulate_scene(scene_type, plot=False)
 
         #plotting

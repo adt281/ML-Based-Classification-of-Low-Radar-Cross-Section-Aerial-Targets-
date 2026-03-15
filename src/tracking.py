@@ -738,10 +738,11 @@ class IMMTracker:
 
 if __name__ == "__main__":
 
-    for scene_type in ["stealth", "aircraft"]:
+    for scene_type in ["aircraft", "stealth", "empty"]:
 
         scene = simulate_scene(scene_type, plot=False)
 
+        #creating the object of CV and CT class. 
         cv = CVTracker(
             dt=scene["metadata"]["dt"],
             measurement_model=scene["measurements"]["measurement_model"],
@@ -757,7 +758,7 @@ if __name__ == "__main__":
 
         for detections in scene["measurements"]["detections"]:
 
-            # ---------------- Initialization ----------------
+            # ---------------- Track Initialization ----------------
             if not cv.initialized:
                 cv.step(detections)
 
