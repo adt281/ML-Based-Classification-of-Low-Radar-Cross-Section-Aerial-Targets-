@@ -690,8 +690,8 @@ class IMMTracker:
             if np.dot(v_cv.flatten(), v_ct.flatten()) < 0:
                 # Do NOT mix velocities, keep dominant model velocity
                 dominant = np.argmax(self.mu)
-                x0[1] = X[dominant][1]
-                x0[3] = X[dominant][3]
+                x0[1,0] = X[dominant][1,0]
+                x0[3,0] = X[dominant][3,0]
 
             P0 = (
                 mu_ij[0,j]*(P[0] + (X[0]-x0)@(X[0]-x0).T) +

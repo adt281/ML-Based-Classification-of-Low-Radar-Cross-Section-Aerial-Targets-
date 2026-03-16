@@ -34,7 +34,9 @@ FEATURE_NAMES = [
     "gated_detections_mean",
     "tracker_miss_ratio",
     "innovation_magnitude_mean",
-    "detections_inside_gate_ratio"
+    "detections_inside_gate_ratio",
+    "snr_dropout_ratio",
+    "track_velocity_variance"
 ]
 
 # ---------------- Utility helpers ----------------
@@ -141,6 +143,9 @@ def extract_features_timestep(result, t):
     mean_snr = safe_mean(snr_series)
     snr_variance = safe_var(snr_series)
     snr_tr = snr_trend(snr_series)
+    # SNR dropout ratio (fraction of scans with very low SNR)
+    dropout_threshold = -20
+    snr_dropout_ratio = float(np.mean(np.array(snr_series) < dropout_threshold))
 
     # ------------------------------------------------
     # Detection statistics
@@ -195,6 +200,25 @@ def extract_features_timestep(result, t):
         else:
             cov_growth = 0
             cov_std = 0
+
+
+    # ------------------------------------------------
+    # Track velocity stability
+    # ------------------------------------------------
+
+    velocity_variance = 0
+
+    if len(cv.estimate_history) > 1:
+
+        track_states = np.array(cv.estimate_history[:t+1])
+
+        vx = track_states[:,1]
+        vy = track_states[:,3]
+
+        speeds = np.sqrt(vx**2 + vy**2)
+
+        if len(speeds) > 1:
+            velocity_variance = float(np.var(speeds))
     # ------------------------------------------------
     # IMM behaviour
     # ------------------------------------------------
@@ -266,8 +290,10 @@ def extract_features_timestep(result, t):
         gated_mean,
         miss_ratio,
         innovation_mean,
-        detections_inside_gate_ratio
-    ])
+        detections_inside_gate_ratio,
+        snr_dropout_ratio,
+        velocity_variance
+        ])
 
     return features
 
