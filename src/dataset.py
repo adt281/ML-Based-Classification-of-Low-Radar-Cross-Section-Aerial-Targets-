@@ -56,17 +56,20 @@ def build_dataset(
     y_all = []
 
     # Aircraft scenes
+    print("Aircraft Scenes:")
+    k=0
     for i in range(aircraft_scenes):
 
         X, y = generate_scene_dataset("aircraft", num_steps)
 
         X_all.append(X)
         y_all.append(y)
-
-        if (i+1) % 50 == 0:
-            print(f"Aircraft scenes generated: {i+1}")
-
+        print("aircraft ",k)
+        k+=1
+        
     # Stealth scenes
+    k=0
+    print("Stealth scenes")
     for i in range(stealth_scenes):
 
         X, y = generate_scene_dataset("stealth", num_steps)
@@ -74,19 +77,20 @@ def build_dataset(
         X_all.append(X)
         y_all.append(y)
 
-        if (i+1) % 50 == 0:
-            print(f"Stealth scenes generated: {i+1}")
+        print("Stealth ",k)
+        k+=1
 
     # Empty scenes
+    print("Empty Scenes")
+    k=0
     for i in range(empty_scenes):
 
         X, y = generate_scene_dataset("empty", num_steps)
 
         X_all.append(X)
         y_all.append(y)
-
-        if (i+1) % 50 == 0:
-            print(f"Empty scenes generated: {i+1}")
+        print("Emtpy ",k)
+        k+=1
 
     X_all = np.vstack(X_all)
     y_all = np.hstack(y_all)

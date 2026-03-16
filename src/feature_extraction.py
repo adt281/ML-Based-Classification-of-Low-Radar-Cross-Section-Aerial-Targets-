@@ -164,21 +164,31 @@ def extract_features_timestep(result, t):
     # Tracker behaviour
     # ------------------------------------------------
 
-    track_initialized = int(cv.initialized)
+    init_scan = scene["metadata"]["num_steps"] - len(cv.estimate_history)
 
-    if cv.initialization_time is None:
-        time_to_init = t + 1
+    if t < init_scan:
+        track_initialized = 0
+        time_to_init = -1
     else:
-        time_to_init = len(cv.estimate_history)
+        track_initialized = 1
+        time_to_init = t - init_scan
 
-    track_length = len(cv.estimate_history)
+    cov_slice = cv.cov_trace_history[:t+1]
+    track_length = len(cov_slice)
 
-    cov_trace = cv.cov_trace_history[:track_length]
+    if track_length == 0:
+        cov_mean = 0
+        cov_growth = 0
+        cov_std = 0
+    else:
+        cov_mean = safe_mean(cov_slice)
 
-    cov_mean = safe_mean(cov_trace)
-    cov_growth = cov_trace[-1] - cov_trace[0] if len(cov_trace) > 1 else 0
-    cov_std = safe_var(cov_trace)
+        if track_length > 1:
+            cov_growth = cov_slice[-1] - cov_slice[0]
+        else:
+            cov_growth = 0
 
+        cov_std = float(np.std(cov_slice)) if track_length > 1 else 0.0
     # ------------------------------------------------
     # IMM behaviour
     # ------------------------------------------------
@@ -194,8 +204,9 @@ def extract_features_timestep(result, t):
         mean_ct_prob = 0
         mode_var = 0
 
-    mode_switch_count = imm.mode_switch_count
+    mode_history = np.array(imm.mode_history[:t+1])
 
+    mode_switch_count = np.sum(mode_history[1:] != mode_history[:-1])
     # ------------------------------------------------
     # Detection–tracker interaction
     # ------------------------------------------------
@@ -209,8 +220,12 @@ def extract_features_timestep(result, t):
     innovations = cv.innovation_history[:t+1]
     innovation_mean = safe_mean(innovations)
 
-    detections_inside_gate_ratio = gated_mean / (safe_mean(detection_count) + 1e-6)
+    mean_detections = safe_mean(detection_count)
 
+    if mean_detections == 0:
+        detections_inside_gate_ratio = 0
+    else:
+        detections_inside_gate_ratio = gated_mean / mean_detections
     # ------------------------------------------------
     # Feature vector
     # ------------------------------------------------

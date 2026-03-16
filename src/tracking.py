@@ -146,6 +146,7 @@ class CVTracker:
 
         innovations = []
         likelihoods = []
+        scan_innovations = []
         S_reference = None
         dyn_model_reference = None
 
@@ -167,7 +168,7 @@ class CVTracker:
             )
 
             # --- log innovation magnitude ---
-            self.innovation_history.append(np.linalg.norm(innovation))
+            scan_innovations.append(np.linalg.norm(innovation))
 
             S = meas_pred.covar
             Sinv = np.linalg.inv(S)
@@ -190,6 +191,11 @@ class CVTracker:
                 S_reference = S
                 dyn_model_reference = dyn_model
         
+        if len(scan_innovations) > 0:
+            self.innovation_history.append(np.mean(scan_innovations))
+        else:
+            self.innovation_history.append(0)
+
         if S_reference is None:
             self.miss_history.append(1)
             self.handle_miss()
@@ -299,11 +305,6 @@ class CVTracker:
         self.predict()
         gated = self.gate(detections)
         logL = self.update(gated)
-
-        x = self.state.state_vector.flatten()
-        self.estimate_history.append(x.copy())
-        self.cov_trace_history.append(np.trace(self.state.covar))
-        self.status_history.append(self.status)
 
         return logL
 
@@ -433,6 +434,7 @@ class CTTracker:
 
         innovations = []
         likelihoods = []
+        scan_innovations = []
         S_reference = None
         dyn_model_reference = None
 
@@ -454,7 +456,7 @@ class CTTracker:
             )
 
             # --- log innovation magnitude ---
-            self.innovation_history.append(np.linalg.norm(innovation))
+            scan_innovations.append(np.linalg.norm(innovation))
 
             S = meas_pred.covar
             Sinv = np.linalg.inv(S)
@@ -476,7 +478,11 @@ class CTTracker:
             if S_reference is None:
                 S_reference = S
                 dyn_model_reference = dyn_model
-
+        
+        if len(scan_innovations) > 0:
+            self.innovation_history.append(np.mean(scan_innovations))
+        else:
+            self.innovation_history.append(0)
         if S_reference is None:
             self.miss_history.append(1)
             self.handle_miss()
@@ -603,11 +609,6 @@ class CTTracker:
         self.predict()
         gated = self.gate(detections)
         logL = self.update(gated)
-
-        x = self.state.state_vector.flatten()
-        self.estimate_history.append(x.copy())
-        self.cov_trace_history.append(np.trace(self.state.covar))
-        self.status_history.append(self.status)
 
         return logL    
 
@@ -822,6 +823,15 @@ def run_tracking(scene_type, num_steps=80):
 
         # Fusion
         imm.fuse()
+        # ---------------- Logging ----------------
+
+        cv.estimate_history.append(cv.state.state_vector.flatten().copy())
+        cv.cov_trace_history.append(np.trace(cv.state.covar))
+        cv.status_history.append(cv.status)
+
+        ct.estimate_history.append(ct.state.state_vector.flatten().copy())
+        ct.cov_trace_history.append(np.trace(ct.state.covar))
+        ct.status_history.append(ct.status)
 
     return {
         "scene": scene,
