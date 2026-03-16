@@ -99,9 +99,9 @@ def generate_scene_dataset(scene_type, num_steps=80):
 # -------------------------------------------------
 
 def build_dataset(
-        aircraft_scenes=1,
-        stealth_scenes=1,
-        empty_scenes=1,
+        aircraft_scenes=50,
+        stealth_scenes=50,
+        empty_scenes=50,
         num_steps=80):
 
     X_all = []
@@ -187,11 +187,11 @@ def load_dataset(filename="radar_dataset.npz"):
 if __name__ == "__main__":
 
     X, y = build_dataset(
-        aircraft_scenes=1,
-        stealth_scenes=1,
-        empty_scenes=1
+        aircraft_scenes=50,
+        stealth_scenes=50,
+        empty_scenes=50
     )
 
     save_dataset(X, y)
-
-    export_csv(X, y)
+    #generate csv only for smoke testing. 
+    #export_csv(X, y)
