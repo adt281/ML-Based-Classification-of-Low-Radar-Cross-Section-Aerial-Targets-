@@ -2,8 +2,9 @@
 
 import numpy as np
 from feature_extraction import extract_features_timestep
-from tracking import run_tracking
 from feature_extraction import export_csv
+from simulation import simulate_scene
+from tracking import CVTracker, CTTracker, IMMTracker
 
 # -------------------------------------------------
 # Label mapping
@@ -20,19 +21,72 @@ LABEL_MAP = {
 # Generate dataset from one scene
 # -------------------------------------------------
 
+
 def generate_scene_dataset(scene_type, num_steps=80):
 
-    result = run_tracking(scene_type, num_steps=num_steps)
+    scene = simulate_scene(scene_type, num_steps=num_steps, plot=False)
 
-    scene = result["scene"]
-    num_steps = scene["metadata"]["num_steps"]
+    cv = CVTracker(
+        dt=scene["metadata"]["dt"],
+        measurement_model=scene["measurements"]["measurement_model"],
+        process_noise_scale=2
+    )
+
+    ct = CTTracker(
+        dt=scene["metadata"]["dt"],
+        measurement_model=scene["measurements"]["measurement_model"]
+    )
+
+    imm = IMMTracker(cv, ct)
 
     X_scene = []
     y_scene = []
 
     label = LABEL_MAP[scene_type]
 
-    for t in range(num_steps):
+    detections_all = scene["measurements"]["detections"]
+
+    for t, detections in enumerate(detections_all):
+
+        # --- initialization phase ---
+        if not cv.initialized:
+            cv.step(detections)
+
+        if not ct.initialized:
+            ct.step(detections)
+
+        # --- IMM tracking phase ---
+        if cv.initialized and ct.initialized:
+
+            imm.interaction()
+
+            cv.predict()
+            ct.predict()
+
+            gated_cv = cv.gate(detections)
+            logL_cv = cv.update(gated_cv)
+
+            gated_ct = ct.gate(detections)
+            logL_ct = ct.update(gated_ct)
+
+            imm.update_mode_probabilities(logL_cv, logL_ct)
+            imm.fuse()
+
+            # logging
+            cv.estimate_history.append(cv.state.state_vector.flatten().copy())
+            cv.cov_trace_history.append(np.trace(cv.state.covar))
+            cv.status_history.append(cv.status)
+
+            ct.estimate_history.append(ct.state.state_vector.flatten().copy())
+            ct.cov_trace_history.append(np.trace(ct.state.covar))
+            ct.status_history.append(ct.status)
+
+        result = {
+            "scene": scene,
+            "cv_tracker": cv,
+            "ct_tracker": ct,
+            "imm_tracker": imm
+        }
 
         features = extract_features_timestep(result, t)
 
@@ -40,8 +94,6 @@ def generate_scene_dataset(scene_type, num_steps=80):
         y_scene.append(label)
 
     return np.array(X_scene), np.array(y_scene)
-
-
 # -------------------------------------------------
 # Build full dataset
 # -------------------------------------------------

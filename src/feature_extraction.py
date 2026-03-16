@@ -147,7 +147,7 @@ def extract_features_timestep(result, t):
     # ------------------------------------------------
 
     total_detections = int(np.sum(detection_count))
-    detections_per_scan_std = safe_var(detection_count)
+    detections_per_scan_std = float(np.std(detection_count))
     max_detections_in_scan = int(np.max(detection_count)) if len(detection_count) else 0
 
     longest_gap = longest_zero_run(detection_presence)
@@ -164,31 +164,37 @@ def extract_features_timestep(result, t):
     # Tracker behaviour
     # ------------------------------------------------
 
-    init_scan = scene["metadata"]["num_steps"] - len(cv.estimate_history)
+    init_time = cv.initialization_time
 
-    if t < init_scan:
+    if init_time is None:
         track_initialized = 0
         time_to_init = -1
     else:
-        track_initialized = 1
-        time_to_init = t - init_scan
+        init_scan = 2   # tracker initializes after 2 detections
 
-    cov_slice = cv.cov_trace_history[:t+1]
-    track_length = len(cov_slice)
+        if t < init_scan:
+            track_initialized = 0
+            time_to_init = -1
+        else:
+            track_initialized = 1
+            time_to_init = t - init_scan
 
-    if track_length == 0:
+    track_length = min(t + 1, len(cv.cov_trace_history))
+    cov_slice = cv.cov_trace_history[:track_length]
+
+    if track_initialized == 0 or track_length == 0:
         cov_mean = 0
         cov_growth = 0
         cov_std = 0
     else:
-        cov_mean = safe_mean(cov_slice)
+        cov_mean = np.log1p(safe_mean(cov_slice))
 
         if track_length > 1:
-            cov_growth = cov_slice[-1] - cov_slice[0]
+            cov_growth = np.log1p(abs(cov_slice[-1] - cov_slice[0]))
+            cov_std = np.log1p(float(np.std(cov_slice)))
         else:
             cov_growth = 0
-
-        cov_std = float(np.std(cov_slice)) if track_length > 1 else 0.0
+            cov_std = 0
     # ------------------------------------------------
     # IMM behaviour
     # ------------------------------------------------
@@ -198,11 +204,11 @@ def extract_features_timestep(result, t):
     if len(mu) > 0:
         mean_cv_prob = safe_mean(mu[:,0])
         mean_ct_prob = safe_mean(mu[:,1])
-        mode_var = safe_var(mu[:,0])
+        mode_std = float(np.std(mu[:,0]))
     else:
         mean_cv_prob = 0
         mean_ct_prob = 0
-        mode_var = 0
+        mode_std = 0
 
     mode_history = np.array(imm.mode_history[:t+1])
 
@@ -225,7 +231,7 @@ def extract_features_timestep(result, t):
     if mean_detections == 0:
         detections_inside_gate_ratio = 0
     else:
-        detections_inside_gate_ratio = gated_mean / mean_detections
+        detections_inside_gate_ratio = min(1.0, gated_mean / mean_detections)
     # ------------------------------------------------
     # Feature vector
     # ------------------------------------------------
@@ -255,7 +261,7 @@ def extract_features_timestep(result, t):
         mean_cv_prob,
         mean_ct_prob,
         mode_switch_count,
-        mode_var,
+        mode_std,
 
         gated_mean,
         miss_ratio,
