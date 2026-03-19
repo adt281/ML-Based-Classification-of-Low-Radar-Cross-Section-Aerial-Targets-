@@ -190,7 +190,7 @@ def simulate_scene(scene_type="aircraft",
         # CLUTTER
         # ============================================================
 
-        clutter_rate = 6
+        clutter_rate = 2 + 10 * (R / max_range)**2
         clutter_count = np.random.poisson(clutter_rate)
         clutter_count_history.append(clutter_count)
 
