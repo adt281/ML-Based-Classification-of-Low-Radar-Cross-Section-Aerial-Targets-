@@ -21,7 +21,11 @@ LABEL_MAP = {
 # Generate dataset from one scene
 # -------------------------------------------------
 
+'''Manual tracking loop required to extract timestep-wise features; 
+run_tracking() only provides final aggregated results and is built for plotting rather than feature extraction.
 
+so run_tracking() ditched for dataset generation and rather re-implemnetation with logging done. 
+'''
 def generate_scene_dataset(scene_type, num_steps=80):
 
     scene = simulate_scene(scene_type, num_steps=num_steps, plot=False)

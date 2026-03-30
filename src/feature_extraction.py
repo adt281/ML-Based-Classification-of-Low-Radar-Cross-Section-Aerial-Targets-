@@ -298,36 +298,6 @@ def extract_features_timestep(result, t):
     return features
 
 
-# ---------------- Dataset builder ----------------
-
-def build_timestep_dataset(scene_type):
-
-    result = run_tracking(scene_type)
-
-    scene = result["scene"]
-    num_steps = scene["metadata"]["num_steps"]
-
-    X = []
-    y = []
-
-    label_map = {
-        "aircraft": 1,
-        "stealth": 2,
-        "empty": 0
-    }
-
-    label = label_map[scene_type]
-
-    for t in range(num_steps):
-
-        features = extract_features_timestep(result, t)
-
-        X.append(features)
-        y.append(label)
-
-    return np.array(X), np.array(y)
-
-import pandas as pd
 
 # ----------------- .csv export helper  -----------------
 def export_csv(X, y, filename="radar_dataset_debug.csv"):
