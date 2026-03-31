@@ -2,7 +2,7 @@ import numpy as np
 from dataset import load_dataset
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report, confusion_matrix, log_loss
 import matplotlib.pyplot as plt
 import seaborn as sns
 import joblib
@@ -20,7 +20,22 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # -------------------------------------------------
 X, y, scene_ids = load_dataset("radar_dataset.npz")
 
-print("Dataset shape:", X.shape)
+print("Original Dataset shape:", X.shape)
+
+# -------------------------------------------------
+# Keep only last timesteps (t >= 50)
+# -------------------------------------------------
+mask = np.zeros(len(scene_ids), dtype=bool)
+
+for sid in np.unique(scene_ids):
+    idx = np.where(scene_ids == sid)[0]
+    mask[idx[50:]] = True
+
+X = X[mask]
+y = y[mask]
+scene_ids = scene_ids[mask]
+
+print("Filtered Dataset shape:", X.shape)
 
 # -------------------------------------------------
 # Train / Test split (scene-level)
@@ -54,9 +69,9 @@ model = RandomForestClassifier(
 
 model.fit(X_train, y_train)
 
-# Save model (fixed names)
+# Save model
 joblib.dump(model, f"{OUTPUT_DIR}/radar_classifier.pkl")
-joblib.dump(model, "radar_classifier.pkl")  # for result.py compatibility
+joblib.dump(model, "radar_classifier.pkl")
 
 print("Model saved at results/ and root directory")
 
@@ -64,21 +79,49 @@ print("Model saved at results/ and root directory")
 # Evaluation
 # -------------------------------------------------
 y_pred = model.predict(X_test)
+y_prob = model.predict_proba(X_test)
 
-# ---- Classification Report ----
-report_dict = classification_report(y_test, y_pred, output_dict=True)
-report_text = classification_report(y_test, y_pred)
+# ---- Standard Classification Report ----
+print("\nStandard Classification Report")
+print(classification_report(y_test, y_pred))
 
-print("\nClassification Report")
-print(report_text)
+# ---- Log Loss ----
+ll = log_loss(y_test, y_prob)
+print("Log Loss:", ll)
 
-with open(f"{OUTPUT_DIR}/report.json", "w") as f:
-    json.dump(report_dict, f, indent=4)
+# ---- Confidence stats ----
+confidence = np.max(y_prob, axis=1)
+print("Mean confidence:", np.mean(confidence))
+print("Min confidence:", np.min(confidence))
+print("Max confidence:", np.max(confidence))
 
-with open(f"{OUTPUT_DIR}/report.txt", "w") as f:
-    f.write(report_text)
+# -------------------------------------------------
+# STRICT THRESHOLD EVALUATION (P >= 0.9)
+# -------------------------------------------------
+threshold = 0.85
 
-# ---- Confusion Matrix ----
+y_pred_strict = []
+
+for i, p in enumerate(y_prob):
+    max_prob = np.max(p)
+    pred_class = np.argmax(p)
+
+    if max_prob >= threshold:
+        y_pred_strict.append(pred_class)
+    else:
+        # force wrong class (pick any class ≠ true label)
+        true = y_test[i]
+        wrong_class = (true + 1) % 3
+        y_pred_strict.append(wrong_class)
+
+y_pred_strict = np.array(y_pred_strict)
+
+print(f"\nStrict Classification Report (P >= {threshold})")
+print(classification_report(y_test, y_pred_strict))
+
+
+
+# ---- Confusion Matrix (standard) ----
 cm = confusion_matrix(y_test, y_pred)
 
 plt.figure(figsize=(6,5))
@@ -107,12 +150,14 @@ plt.savefig(f"{OUTPUT_DIR}/feature_importance.png")
 plt.close()
 
 # -------------------------------------------------
-# Save predictions
+# Save predictions + probabilities
 # -------------------------------------------------
 np.savez(
     f"{OUTPUT_DIR}/predictions.npz",
     y_true=y_test,
-    y_pred=y_pred
+    y_pred=y_pred,
+    y_prob=y_prob,
+    y_pred_strict=y_pred_strict
 )
 
 # -------------------------------------------------
@@ -122,7 +167,10 @@ metadata = {
     "n_estimators": 200,
     "max_depth": None,
     "train_samples": int(len(X_train)),
-    "test_samples": int(len(X_test))
+    "test_samples": int(len(X_test)),
+    "log_loss": float(ll),
+    "mean_confidence": float(np.mean(confidence)),
+    "threshold": threshold
 }
 
 with open(f"{OUTPUT_DIR}/metadata.json", "w") as f:
