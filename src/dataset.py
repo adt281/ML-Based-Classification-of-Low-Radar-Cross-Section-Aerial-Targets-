@@ -110,66 +110,63 @@ def build_dataset(
 
     X_all = []
     y_all = []
+    scene_ids = []
+    scene_counter = 0
 
     # Aircraft scenes
     print("Aircraft Scenes:")
-    k=0
     for i in range(aircraft_scenes):
-
         X, y = generate_scene_dataset("aircraft", num_steps)
-
         X_all.append(X)
         y_all.append(y)
-        print("aircraft ",k)
-        k+=1
-        
+
+        scene_ids.extend([scene_counter] * len(y))
+        scene_counter += 1
+        print(f"aircraft scene {i} scene_id={scene_counter-1}")
+
     # Stealth scenes
-    k=0
-    print("Stealth scenes")
+    print("Stealth Scenes:")
     for i in range(stealth_scenes):
-
         X, y = generate_scene_dataset("stealth", num_steps)
-
         X_all.append(X)
         y_all.append(y)
 
-        print("Stealth ",k)
-        k+=1
+        scene_ids.extend([scene_counter] * len(y))
+        scene_counter += 1
+        print(f"stealth scene {i} scene_id={scene_counter-1}")
 
     # Empty scenes
-    print("Empty Scenes")
-    k=0
+    print("Empty Scenes:")
     for i in range(empty_scenes):
-
         X, y = generate_scene_dataset("empty", num_steps)
-
         X_all.append(X)
         y_all.append(y)
-        print("Emtpy ",k)
-        k+=1
+
+        scene_ids.extend([scene_counter] * len(y))
+        scene_counter += 1
+        print(f"empty scene {i} scene_id={scene_counter-1}")
 
     X_all = np.vstack(X_all)
     y_all = np.hstack(y_all)
+    scene_ids = np.array(scene_ids)
 
-    return X_all, y_all
-
+    return X_all, y_all, scene_ids
 
 # -------------------------------------------------
 # Save dataset
 # -------------------------------------------------
-
-def save_dataset(X, y, filename="radar_dataset.npz"):
+def save_dataset(X, y, scene_ids, filename="radar_dataset.npz"):
 
     np.savez_compressed(
         filename,
         X=X,
-        y=y
+        y=y,
+        scene_ids=scene_ids
     )
 
     print("Dataset saved:", filename)
     print("Samples:", X.shape[0])
     print("Features:", X.shape[1])
-
 
 # -------------------------------------------------
 # Load dataset
@@ -181,21 +178,21 @@ def load_dataset(filename="radar_dataset.npz"):
 
     X = data["X"]
     y = data["y"]
+    scene_ids = data["scene_ids"]
 
-    return X, y
-
+    return X, y, scene_ids
 
 # -------------------------------------------------
 # Main (dataset generation)
 # -------------------------------------------------
 if __name__ == "__main__":
 
-    X, y = build_dataset(
+    X, y, scene_ids = build_dataset(
         aircraft_scenes=50,
         stealth_scenes=50,
         empty_scenes=50
     )
 
-    save_dataset(X, y)
+    save_dataset(X, y, scene_ids)
     #generate csv only for smoke testing. 
     #export_csv(X, y)

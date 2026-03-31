@@ -9,9 +9,7 @@ from feature_extraction import extract_features_timestep
 # -------------------------------------------------
 # Load trained classifier
 # -------------------------------------------------
-
-model = joblib.load("radar_classifier.pkl")
-
+model = joblib.load("results/radar_classifier.pkl")
 label_map = {
     0: "Empty",
     1: "Aircraft",

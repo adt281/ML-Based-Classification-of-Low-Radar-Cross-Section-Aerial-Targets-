@@ -6,6 +6,8 @@ data = np.load("radar_dataset.npz")
 
 X = data["X"]
 y = data["y"]
+# scene_ids 
+scene_ids = data["scene_ids"]
 
 # Convert to dataframe
 df = pd.DataFrame(X, columns=FEATURE_NAMES)

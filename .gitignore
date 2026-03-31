@@ -35,3 +35,11 @@ dist/
 #saved feature file: 
 *.npz
 *.csv
+
+
+results/
+*.png
+*.json
+*.txt
+*.npz
+*.pkl
