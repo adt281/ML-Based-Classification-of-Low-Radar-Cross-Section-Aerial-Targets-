@@ -24,20 +24,6 @@ X, y, scene_ids = load_dataset("radar_dataset_combined.npz")
 
 print("Original Dataset shape:", X.shape)
 
-# -------------------------------------------------
-# Keep only last timesteps (t >= 50)
-# -------------------------------------------------
-mask = np.zeros(len(scene_ids), dtype=bool)
-
-for sid in np.unique(scene_ids):
-    idx = np.where(scene_ids == sid)[0]
-    mask[idx[50:]] = True
-
-X = X[mask]
-y = y[mask]
-scene_ids = scene_ids[mask]
-
-print("Filtered Dataset shape:", X.shape)
 
 # -------------------------------------------------
 # Train / Test split (scene-level)
@@ -58,6 +44,12 @@ y_train, y_test = y[train_mask], y[test_mask]
 
 print("Train samples:", X_train.shape[0])
 print("Test samples:", X_test.shape[0])
+
+NOISE_STD = 10 
+
+np.random.seed(42)
+X_train = X_train + np.random.normal(0, NOISE_STD, X_train.shape)
+X_test  = X_test  + np.random.normal(0, NOISE_STD, X_test.shape)
 
 # -------------------------------------------------
 # Model
