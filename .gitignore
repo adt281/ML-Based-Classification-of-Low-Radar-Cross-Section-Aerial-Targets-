@@ -43,3 +43,7 @@ results/
 *.txt
 *.npz
 *.pkl
+
+
+#merge file
+merge_tempfile.py

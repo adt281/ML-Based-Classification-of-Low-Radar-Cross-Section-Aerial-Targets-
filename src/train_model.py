@@ -3,11 +3,13 @@ from dataset import load_dataset
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, confusion_matrix, log_loss
+from xgboost import XGBClassifier
 import matplotlib.pyplot as plt
 import seaborn as sns
 import joblib
 import os
 import json
+
 
 # -------------------------------------------------
 # Setup output directory
@@ -18,7 +20,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # -------------------------------------------------
 # Load dataset
 # -------------------------------------------------
-X, y, scene_ids = load_dataset("radar_dataset.npz")
+X, y, scene_ids = load_dataset("radar_dataset_combined.npz")
 
 print("Original Dataset shape:", X.shape)
 
@@ -60,11 +62,19 @@ print("Test samples:", X_test.shape[0])
 # -------------------------------------------------
 # Model
 # -------------------------------------------------
-model = RandomForestClassifier(
-    n_estimators=200,
-    max_depth=None,
+model = XGBClassifier(
+    n_estimators=80,        # ↓ fewer trees
+    max_depth=3,            # ↓ shallower trees
+    learning_rate=0.2,      # ↑ faster but less precise
+    subsample=0.6,          # ↓ less data per tree
+    colsample_bytree=0.6,   # ↓ fewer features per tree
+    reg_lambda=5,           # ↑ L2 regularization
+    reg_alpha=2,            # ↑ L1 regularization
+    objective="multi:softprob",
+    num_class=3,
     n_jobs=-1,
-    random_state=42
+    random_state=42,
+    eval_metric="mlogloss"
 )
 
 model.fit(X_train, y_train)
